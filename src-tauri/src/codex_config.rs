@@ -86,6 +86,29 @@ fn codex_top_level_model(config_text: &str) -> Option<String> {
         .filter(|value| !value.is_empty())
 }
 
+fn codex_active_profile_value<'a>(doc: &'a toml::Value, key: &str) -> Option<&'a str> {
+    let profile = doc.get("profile").and_then(|value| value.as_str())?;
+    doc.get("profiles")
+        .and_then(|profiles| profiles.get(profile))
+        .and_then(|profile| profile.get(key))
+        .and_then(|value| value.as_str())
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+}
+
+/// Model selected by the active profile, falling back to the top-level model.
+fn codex_active_model(config_text: &str) -> Option<String> {
+    let doc = config_text.parse::<toml::Value>().ok()?;
+    codex_active_profile_value(&doc, "model")
+        .or_else(|| {
+            doc.get("model")
+                .and_then(|value| value.as_str())
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+        })
+        .map(str::to_string)
+}
+
 /// Whether a native `/responses` provider's gateway is known to reject the Codex
 /// `web_search` hosted tool — by `base_url` host OR by the active model's brand
 /// (so an aggregator fronting a reject vendor's model is caught too). Driven by
@@ -1124,6 +1147,37 @@ pub fn extract_codex_base_url(config_text: &str) -> Option<String> {
         .map(ToString::to_string)
 }
 
+/// Resolve the base URL for catalog generation, including an active profile's
+/// `model_provider` override without changing general config extraction rules.
+fn extract_codex_catalog_base_url(config_text: &str) -> Option<String> {
+    let doc = config_text.parse::<toml::Value>().ok()?;
+    let profile_provider = codex_active_profile_value(&doc, "model_provider");
+    let top_level_provider = doc
+        .get("model_provider")
+        .and_then(|value| value.as_str())
+        .map(str::trim)
+        .filter(|value| !value.is_empty());
+    let active_provider = profile_provider.or(top_level_provider);
+
+    if let Some(base_url) = active_provider
+        .and_then(|provider| doc.get("model_providers")?.get(provider))
+        .and_then(|provider| provider.get("base_url"))
+        .and_then(|value| value.as_str())
+    {
+        return Some(base_url.to_string());
+    }
+
+    // A profile that explicitly changes provider must not inherit a top-level
+    // URL belonging to the provider it replaced.
+    if profile_provider.is_some_and(|provider| Some(provider) != top_level_provider) {
+        return None;
+    }
+
+    doc.get("base_url")
+        .and_then(|value| value.as_str())
+        .map(ToString::to_string)
+}
+
 pub fn codex_auth_has_login_material(auth: &Value) -> bool {
     let Some(obj) = auth.as_object() else {
         return false;
@@ -1904,11 +1958,18 @@ fn codex_official_vendor_catalog_models(
     if profile != CodexCatalogToolProfile::NativeResponses {
         return None;
     }
-    let base_url = extract_codex_base_url(config_text)?.to_ascii_lowercase();
-    if CODEX_DEEPSEEK_OFFICIAL_CATALOG_HOSTS
-        .iter()
-        .any(|host| base_url.contains(host))
-    {
+    let base_url = extract_codex_catalog_base_url(config_text)?;
+    let hostname = url::Url::parse(&base_url)
+        .ok()?
+        .host_str()?
+        .to_ascii_lowercase();
+    let hostname = hostname.strip_suffix('.').unwrap_or(&hostname);
+    if CODEX_DEEPSEEK_OFFICIAL_CATALOG_HOSTS.iter().any(|host| {
+        hostname == *host
+            || hostname
+                .strip_suffix(*host)
+                .is_some_and(|prefix| prefix.ends_with('.'))
+    }) {
         let models = load_codex_deepseek_official_catalog_models();
         if !models.is_empty() {
             return Some(models);
@@ -1933,7 +1994,7 @@ fn synthesize_official_catalog_specs(
     let Some(vendor_models) = codex_official_vendor_catalog_models(config_text, profile) else {
         return Vec::new();
     };
-    let Some(model) = codex_top_level_model(config_text).or_else(|| {
+    let Some(model) = codex_active_model(config_text).or_else(|| {
         vendor_models
             .first()
             .and_then(|entry| entry.get("slug"))
@@ -1962,6 +2023,8 @@ fn synthesize_official_catalog_specs(
         supports_parallel_tool_calls: None,
         input_modalities: None,
         base_instructions: None,
+        reasoning_levels: None,
+        default_reasoning_level: None,
     }]
 }
 
@@ -7028,6 +7091,74 @@ wire_api = "responses"
     }
 
     #[test]
+    fn deepseek_empty_catalog_uses_selected_profile_provider_and_model() {
+        let settings = json!({ "modelCatalog": { "models": [] } });
+        let config =
+            |top_provider: &str, top_model: &str, profile_provider: &str, profile_model: &str| {
+                format!(
+                    r#"profile = "work"
+model = "{top_model}"
+model_provider = "{top_provider}"
+
+[model_providers]
+deepseek = {{ base_url = "https://api.deepseek.com", wire_api = "responses" }}
+minimax = {{ base_url = "https://api.minimaxi.com/v1", wire_api = "responses" }}
+
+[profiles.work]
+model = "{profile_model}"
+model_provider = "{profile_provider}"
+"#
+                )
+            };
+
+        let catalog = codex_model_catalog_from_settings(
+            &settings,
+            &config("minimax", "MiniMax-M3", "deepseek", "deepseek-v4-pro"),
+            CodexCatalogToolProfile::NativeResponses,
+        )
+        .expect("synthesis should not error")
+        .expect("DeepSeek native provider must yield a catalog");
+
+        assert_eq!(
+            catalog["models"][0].get("slug").and_then(|v| v.as_str()),
+            Some("deepseek-v4-pro"),
+            "the selected profile provider and model must override top-level values"
+        );
+
+        let catalog = codex_model_catalog_from_settings(
+            &settings,
+            &config("deepseek", "deepseek-v4-flash", "minimax", "MiniMax-M3"),
+            CodexCatalogToolProfile::NativeResponses,
+        )
+        .expect("synthesis should not error");
+        assert!(
+            catalog.is_none(),
+            "a non-DeepSeek profile must not inherit DeepSeek catalog capabilities"
+        );
+
+        let same_provider_with_top_level_url = r#"profile = "work"
+model = "deepseek-v4-flash"
+model_provider = "deepseek"
+base_url = "https://api.deepseek.com"
+
+[profiles.work]
+model = "deepseek-v4-pro"
+model_provider = "deepseek"
+"#;
+        let catalog = codex_model_catalog_from_settings(
+            &settings,
+            same_provider_with_top_level_url,
+            CodexCatalogToolProfile::NativeResponses,
+        )
+        .expect("synthesis should not error")
+        .expect("the same profile provider may inherit its top-level base URL");
+        assert_eq!(
+            catalog["models"][0].get("slug").and_then(|v| v.as_str()),
+            Some("deepseek-v4-pro")
+        );
+    }
+
+    #[test]
     fn empty_model_catalog_on_non_deepseek_native_stays_none() {
         // Non-DeepSeek native Responses providers with empty modelCatalog
         // must NOT be granted an official catalog — the host+profile gate
@@ -7085,6 +7216,13 @@ wire_api = "responses"
             CodexCatalogToolProfile::NativeResponses
         )
         .is_some_and(|models| !models.is_empty()));
+        let absolute_fqdn_config =
+            DEEPSEEK_NATIVE_CONFIG.replace("api.deepseek.com", "api.deepseek.com.");
+        assert!(codex_official_vendor_catalog_models(
+            &absolute_fqdn_config,
+            CodexCatalogToolProfile::NativeResponses
+        )
+        .is_some_and(|models| !models.is_empty()));
 
         for profile in [
             CodexCatalogToolProfile::ProxyChat,
@@ -7116,6 +7254,21 @@ wire_api = "responses"
             codex_official_vendor_catalog_models("", CodexCatalogToolProfile::NativeResponses)
                 .is_none()
         );
+
+        for base_url in [
+            "https://deepseek.com.evil.example/v1",
+            "https://relay.example/deepseek.com/v1",
+        ] {
+            let config = DEEPSEEK_NATIVE_CONFIG.replace("https://api.deepseek.com", base_url);
+            assert!(
+                codex_official_vendor_catalog_models(
+                    &config,
+                    CodexCatalogToolProfile::NativeResponses
+                )
+                .is_none(),
+                "non-DeepSeek hostname must not receive the official catalog: {base_url}"
+            );
+        }
     }
 
     #[test]

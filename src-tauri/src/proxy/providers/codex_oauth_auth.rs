@@ -13,7 +13,7 @@
 //! ## 多账号支持
 //! - 每个 ChatGPT 账号独立存储 refresh_token
 //! - Provider 通过 meta.authBinding 关联账号（auth_provider = "codex_oauth"）
-//! - 通过 JWT id_token 提取 chatgpt_account_id 作为账号唯一标识
+//! - 本地账号 ID 用于绑定和缓存；chatgpt_account_id 仅表示上游 workspace
 
 use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine as _};
 
@@ -28,6 +28,7 @@ use std::sync::{
 };
 use std::time::Duration;
 use tokio::sync::{Mutex, RwLock};
+use uuid::Uuid;
 
 use super::copilot_auth::{GitHubAccount, GitHubDeviceCodeResponse};
 
@@ -144,16 +145,8 @@ struct IdTokenClaims {
     chatgpt_account_id: Option<String>,
     #[serde(default)]
     email: Option<String>,
-    #[serde(default)]
-    organizations: Vec<OrgClaim>,
     #[serde(default, rename = "https://api.openai.com/auth")]
     openai_auth: Option<OpenAiAuthClaim>,
-}
-
-#[derive(Debug, Clone, Default, Deserialize)]
-struct OrgClaim {
-    #[serde(default)]
-    id: Option<String>,
 }
 
 #[derive(Debug, Clone, Default, Deserialize)]
@@ -231,8 +224,11 @@ struct PendingDeviceCode {
 /// 持久化的账号数据
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct CodexAccountData {
-    /// chatgpt_account_id（同时作为 HashMap 的 key）
+    /// 本地稳定账号 ID（同时作为 HashMap 的 key）
     pub account_id: String,
+    /// 上游 ChatGPT workspace ID（用于 chatgpt-account-id 请求头）
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub chatgpt_account_id: Option<String>,
     /// 账号邮箱（如果可获取）
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub email: Option<String>,
@@ -255,11 +251,15 @@ impl From<&CodexAccountData> for GitHubAccount {
     fn from(data: &CodexAccountData) -> Self {
         GitHubAccount {
             id: data.account_id.clone(),
-            // 用 email 作为显示名（若无则用 account_id）
-            login: data
-                .email
-                .clone()
-                .unwrap_or_else(|| format!("ChatGPT ({})", &data.account_id)),
+            // 用 email 作为显示名（若无则用上游 workspace ID）
+            login: data.email.clone().unwrap_or_else(|| {
+                format!(
+                    "ChatGPT ({})",
+                    data.chatgpt_account_id
+                        .as_deref()
+                        .unwrap_or(&data.account_id)
+                )
+            }),
             avatar_url: None,
             authenticated_at: data.authenticated_at,
             github_domain: "github.com".to_string(),
@@ -269,7 +269,32 @@ impl From<&CodexAccountData> for GitHubAccount {
     }
 }
 
-/// 持久化存储结构（v1）
+impl CodexAccountData {
+    fn apply_refreshed_tokens(&mut self, tokens: &OAuthTokenResponse) -> bool {
+        let refreshed_account_id = extract_account_metadata_from_tokens(tokens).0;
+        let mut changed = false;
+        if let Some(account_id) = refreshed_account_id {
+            if self.chatgpt_account_id.as_deref() != Some(&account_id) {
+                self.chatgpt_account_id = Some(account_id);
+                changed = true;
+            }
+        }
+        if let Some(refresh_token) = tokens
+            .refresh_token
+            .as_ref()
+            .filter(|token| !token.trim().is_empty())
+        {
+            if self.refresh_token != *refresh_token {
+                self.refresh_token = refresh_token.clone();
+                changed = true;
+            }
+        }
+
+        changed
+    }
+}
+
+/// 持久化存储结构（v2）
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 struct CodexOAuthStore {
     #[serde(default)]
@@ -283,6 +308,7 @@ struct CodexOAuthStore {
 /// 写入托管 Codex `auth.json` 所需的完整可刷新 token 束。
 #[derive(Debug, Clone)]
 pub(crate) struct ManagedTokenBundle {
+    pub chatgpt_account_id: String,
     pub access_token: String,
     pub id_token: Option<String>,
     pub refresh_token: String,
@@ -495,9 +521,9 @@ impl CodexOAuthManager {
             CodexOAuthError::TokenFetchFailed("响应缺少 refresh_token".to_string())
         })?;
 
-        let (account_id, email) = extract_identity_from_tokens(&tokens);
-        let account_id = account_id.ok_or_else(|| {
-            CodexOAuthError::ParseError("无法从 token 中提取 account_id".to_string())
+        let (chatgpt_account_id, email) = extract_account_metadata_from_tokens(&tokens);
+        let chatgpt_account_id = chatgpt_account_id.ok_or_else(|| {
+            CodexOAuthError::ParseError("无法从 token 中提取 chatgpt_account_id".to_string())
         })?;
 
         let obtained_at_ms = chrono::Utc::now().timestamp_millis();
@@ -505,7 +531,7 @@ impl CodexOAuthManager {
         // access cache 一次写入，旧刷新响应因此不能覆盖新登录链。
         let account = self
             .add_account_internal(
-                account_id.clone(),
+                chatgpt_account_id,
                 refresh_token,
                 email,
                 // 空字符串视为缺失，避免写出空的 id_token
@@ -615,6 +641,57 @@ impl CodexOAuthManager {
         Ok(self.resolve_valid_cached_token(account_id).await?.token)
     }
 
+    async fn read_managed_live_auth_refresh_for_account(
+        &self,
+        account_id: &str,
+    ) -> Result<Option<(String, Option<String>, Option<i64>)>, CodexOAuthError> {
+        let managed_id_token = {
+            let accounts = self.accounts.read().await;
+            accounts
+                .get(account_id)
+                .ok_or_else(|| CodexOAuthError::AccountNotFound(account_id.to_string()))?
+                .id_token
+                .clone()
+        };
+        let Some(live_refresh) =
+            crate::codex_config::read_codex_live_auth_refresh_for_managed_account(
+                account_id,
+                managed_id_token.as_deref(),
+            )
+            .map_err(|error| CodexOAuthError::TokenFetchFailed(error.to_string()))?
+        else {
+            return Ok(None);
+        };
+
+        let mut needs_save = false;
+        {
+            let mut accounts = self.accounts.write().await;
+            let account = accounts
+                .get_mut(account_id)
+                .ok_or_else(|| CodexOAuthError::AccountNotFound(account_id.to_string()))?;
+            match account.chatgpt_account_id.as_deref() {
+                None => {
+                    account.chatgpt_account_id = Some(live_refresh.chatgpt_account_id.clone());
+                    needs_save = true;
+                }
+                Some(stored) if stored != live_refresh.chatgpt_account_id => {
+                    return Err(CodexOAuthError::TokenFetchFailed(format!(
+                        "Codex OAuth 账号 {account_id} 的 workspace 与磁盘凭据不一致，本次操作已取消"
+                    )));
+                }
+                Some(_) => {}
+            }
+        }
+        if needs_save {
+            self.save_to_disk().await?;
+        }
+        Ok(Some((
+            live_refresh.refresh_token,
+            live_refresh.id_token,
+            live_refresh.last_refresh_ms,
+        )))
+    }
+
     /// 解析账号的有效缓存 token（含真实获取时间），必要时刷新。
     ///
     /// 返回完整 `CachedAccessToken`，使 token 与其 `obtained_at_ms` 天然配套（写托管
@@ -659,8 +736,9 @@ impl CodexOAuthManager {
         // Codex CLI may have advanced the shared refresh-token generation since
         // this manager last used the account. Reload it under the same per-account
         // lock before deciding whether a network refresh is necessary.
-        if let Some((live_refresh, live_id_token, live_last_refresh_ms)) =
-            crate::codex_config::read_codex_live_auth_refresh_for_account(account_id)
+        if let Some((live_refresh, live_id_token, live_last_refresh_ms)) = self
+            .read_managed_live_auth_refresh_for_account(account_id)
+            .await?
         {
             self.adopt_account_refresh_token_under_lock(
                 account_id,
@@ -699,9 +777,10 @@ impl CodexOAuthManager {
                 // If Codex CLI refreshed between our pre-read and request, reload
                 // its newer generation and retry exactly once. Error-code handling
                 // includes OpenAI's `refresh_token_reused` response.
-                let Some((live_refresh, live_id_token, live_last_refresh_ms)) =
-                    crate::codex_config::read_codex_live_auth_refresh_for_account(account_id)
-                        .filter(|(token, _, _)| token.trim() != refresh_token.as_str())
+                let Some((live_refresh, live_id_token, live_last_refresh_ms)) = self
+                    .read_managed_live_auth_refresh_for_account(account_id)
+                    .await?
+                    .filter(|(token, _, _)| token.trim() != refresh_token.as_str())
                 else {
                     return Err(CodexOAuthError::RefreshTokenInvalid);
                 };
@@ -727,7 +806,7 @@ impl CodexOAuthManager {
 
         // 如果服务端返回了新的 refresh_token 或 id_token，更新存储
         let mut needs_save = false;
-        let (stored_refresh_token, stored_id_token) = {
+        let (stored_refresh_token, stored_id_token, chatgpt_account_id) = {
             let mut accounts = self.accounts.write().await;
             let account = accounts
                 .get_mut(account_id)
@@ -740,15 +819,8 @@ impl CodexOAuthManager {
                     "账号凭据已更新，已丢弃旧刷新响应".to_string(),
                 ));
             }
-            if let Some(new_refresh) = new_tokens
-                .refresh_token
-                .clone()
-                .filter(|token| !token.trim().is_empty())
-            {
-                if new_refresh != account.refresh_token {
-                    account.refresh_token = new_refresh;
-                    needs_save = true;
-                }
+            if account.apply_refreshed_tokens(&new_tokens) {
+                needs_save = true;
             }
             // 刷新使用 openid scope，正常会返回新 id_token；为空则视为缺失，
             // 保留旧值而非覆盖（旧值的 claims 仍可用于账号/套餐显示）。
@@ -766,11 +838,20 @@ impl CodexOAuthManager {
                 account.token_updated_at_ms = obtained_at_ms;
                 needs_save = true;
             }
-            (account.refresh_token.clone(), account.id_token.clone())
+            (
+                account.refresh_token.clone(),
+                account.id_token.clone(),
+                account.chatgpt_account_id.clone(),
+            )
         };
         if needs_save {
             self.save_to_disk().await?;
         }
+        let chatgpt_account_id = chatgpt_account_id.ok_or_else(|| {
+            CodexOAuthError::ParseError(
+                "无法从刷新后的 token 中提取 chatgpt_account_id".to_string(),
+            )
+        })?;
 
         let cached = CachedAccessToken {
             token: new_tokens.access_token.clone(),
@@ -782,7 +863,7 @@ impl CodexOAuthManager {
             .unwrap_or_else(chrono::Utc::now)
             .to_rfc3339_opts(chrono::SecondsFormat::Nanos, true);
         let refreshed_auth = crate::codex_config::codex_managed_oauth_auth_value(
-            account_id,
+            &chatgpt_account_id,
             &cached.token,
             stored_id_token.as_deref(),
             &stored_refresh_token,
@@ -854,8 +935,9 @@ impl CodexOAuthManager {
         // access token. Keeping this check after resolution also preserves the
         // RefreshTokenInvalid recovery path: the server may disprove manager R0,
         // force-adopt disk R1, and only then produce a safe bundle.
-        if let Some((live_refresh, live_id_token, live_last_refresh_ms)) =
-            crate::codex_config::read_codex_live_auth_refresh_for_account(account_id)
+        if let Some((live_refresh, live_id_token, live_last_refresh_ms)) = self
+            .read_managed_live_auth_refresh_for_account(account_id)
+            .await?
         {
             let outcome = self
                 .adopt_account_refresh_token_under_lock(
@@ -886,14 +968,23 @@ impl CodexOAuthManager {
             chrono::DateTime::<chrono::Utc>::from_timestamp_millis(cached.obtained_at_ms)
                 .unwrap_or_else(chrono::Utc::now)
                 .to_rfc3339_opts(chrono::SecondsFormat::Nanos, true);
-        let (id_token, refresh_token) = {
+        let (chatgpt_account_id, id_token, refresh_token) = {
             let accounts = self.accounts.read().await;
             let account = accounts
                 .get(account_id)
                 .ok_or_else(|| CodexOAuthError::AccountNotFound(account_id.to_string()))?;
-            (account.id_token.clone(), account.refresh_token.clone())
+            (
+                account.chatgpt_account_id.clone().ok_or_else(|| {
+                    CodexOAuthError::ParseError(
+                        "账号缺少 chatgpt_account_id，请重新认证".to_string(),
+                    )
+                })?,
+                account.id_token.clone(),
+                account.refresh_token.clone(),
+            )
         };
         Ok(ManagedTokenBundle {
+            chatgpt_account_id,
             access_token: cached.token,
             id_token,
             refresh_token,
@@ -952,12 +1043,6 @@ impl CodexOAuthManager {
         &self,
         account_id: &str,
     ) -> Result<Option<String>, CodexOAuthError> {
-        let Some((live_refresh, live_id_token, live_last_refresh_ms)) =
-            crate::codex_config::read_codex_live_auth_refresh_for_account(account_id)
-        else {
-            return Ok(None);
-        };
-
         let _lifecycle = self.lifecycle_lock.read().await;
         let refresh_lock = self.get_refresh_lock(account_id).await;
         let _guard = refresh_lock.lock().await;
@@ -967,6 +1052,12 @@ impl CodexOAuthManager {
                 .get(account_id)
                 .ok_or_else(|| CodexOAuthError::AccountNotFound(account_id.to_string()))?;
         }
+        let Some((live_refresh, live_id_token, live_last_refresh_ms)) = self
+            .read_managed_live_auth_refresh_for_account(account_id)
+            .await?
+        else {
+            return Ok(None);
+        };
 
         let outcome = self
             .adopt_account_refresh_token_under_lock(
@@ -1133,6 +1224,20 @@ impl CodexOAuthManager {
         self.resolve_default_account_id().await
     }
 
+    /// 将本地账号 ID 解析为上游 ChatGPT workspace ID。
+    pub async fn chatgpt_account_id_for_account(
+        &self,
+        account_id: &str,
+    ) -> Result<String, CodexOAuthError> {
+        let accounts = self.accounts.read().await;
+        let account = accounts
+            .get(account_id)
+            .ok_or_else(|| CodexOAuthError::AccountNotFound(account_id.to_string()))?;
+        account.chatgpt_account_id.clone().ok_or_else(|| {
+            CodexOAuthError::ParseError("账号缺少 chatgpt_account_id，请重新认证".to_string())
+        })
+    }
+
     // ==================== 多账号管理 ====================
 
     pub async fn list_accounts(&self) -> Vec<GitHubAccount> {
@@ -1289,20 +1394,52 @@ impl CodexOAuthManager {
         access_token: &str,
         id_token: Option<&str>,
     ) -> Result<(), CodexOAuthError> {
-        let obtained_at_ms = chrono::Utc::now().timestamp_millis();
-        self.add_account_internal(
-            account_id.to_string(),
-            "test-refresh-token".to_string(),
-            Some(format!("{account_id}@example.test")),
-            id_token.map(|token| token.to_string()),
-            Some(CachedAccessToken {
-                token: access_token.to_string(),
-                expires_at_ms: obtained_at_ms + 3_600_000,
-                obtained_at_ms,
-            }),
-            None,
+        self.add_test_account_with_workspace_and_access_token(
+            account_id,
+            account_id,
+            access_token,
+            id_token,
         )
-        .await?;
+        .await
+    }
+
+    #[cfg(test)]
+    pub(crate) async fn add_test_account_with_workspace_and_access_token(
+        &self,
+        account_id: &str,
+        chatgpt_account_id: &str,
+        access_token: &str,
+        id_token: Option<&str>,
+    ) -> Result<(), CodexOAuthError> {
+        let obtained_at_ms = chrono::Utc::now().timestamp_millis();
+        let data = CodexAccountData {
+            account_id: account_id.to_string(),
+            chatgpt_account_id: Some(chatgpt_account_id.to_string()),
+            email: Some(format!("{account_id}@example.test")),
+            refresh_token: "test-refresh-token".to_string(),
+            authenticated_at: chrono::Utc::now().timestamp(),
+            id_token: id_token.map(|token| token.to_string()),
+            token_updated_at_ms: obtained_at_ms,
+        };
+        {
+            let mut accounts = self.accounts.write().await;
+            accounts.insert(account_id.to_string(), data);
+            self.access_tokens.write().await.insert(
+                account_id.to_string(),
+                CachedAccessToken {
+                    token: access_token.to_string(),
+                    expires_at_ms: obtained_at_ms + 3_600_000,
+                    obtained_at_ms,
+                },
+            );
+        }
+        {
+            let mut default = self.default_account_id.write().await;
+            if default.is_none() {
+                *default = Some(account_id.to_string());
+            }
+        }
+        self.save_to_disk().await?;
 
         Ok(())
     }
@@ -1334,7 +1471,7 @@ impl CodexOAuthManager {
 
     async fn add_account_internal(
         &self,
-        account_id: String,
+        chatgpt_account_id: String,
         refresh_token: String,
         email: Option<String>,
         id_token: Option<String>,
@@ -1356,6 +1493,7 @@ impl CodexOAuthManager {
                 return Err(CodexOAuthError::ExpiredToken);
             }
         }
+        let account_id = Uuid::new_v4().to_string();
         let refresh_lock = self.get_refresh_lock(&account_id).await;
         let _refresh_guard = refresh_lock.lock().await;
         let now = chrono::Utc::now().timestamp();
@@ -1363,6 +1501,7 @@ impl CodexOAuthManager {
 
         let data = CodexAccountData {
             account_id: account_id.clone(),
+            chatgpt_account_id: Some(chatgpt_account_id),
             email,
             refresh_token,
             authenticated_at: now,
@@ -1538,7 +1677,7 @@ impl CodexOAuthManager {
         let default = self.resolve_default_account_id().await;
 
         let store = CodexOAuthStore {
-            version: 1,
+            version: 2,
             accounts,
             default_account_id: default,
         };
@@ -1610,39 +1749,33 @@ fn parse_jwt_claims(token: &str) -> Option<IdTokenClaims> {
     serde_json::from_slice(&decoded).ok()
 }
 
-/// 从 token 响应中提取 (account_id, email)
-fn extract_identity_from_tokens(tokens: &OAuthTokenResponse) -> (Option<String>, Option<String>) {
+/// 从 token 响应中提取 (chatgpt_account_id, email)
+fn extract_account_metadata_from_tokens(
+    tokens: &OAuthTokenResponse,
+) -> (Option<String>, Option<String>) {
     let mut account_id: Option<String> = None;
     let mut email: Option<String> = None;
 
     if let Some(id_token) = tokens.id_token.as_deref() {
         if let Some(claims) = parse_jwt_claims(id_token) {
-            account_id = claims
-                .chatgpt_account_id
-                .clone()
-                .or_else(|| {
-                    claims
-                        .openai_auth
-                        .as_ref()
-                        .and_then(|a| a.chatgpt_account_id.clone())
-                })
-                .or_else(|| claims.organizations.first().and_then(|o| o.id.clone()));
+            account_id = claims.chatgpt_account_id.clone().or_else(|| {
+                claims
+                    .openai_auth
+                    .as_ref()
+                    .and_then(|a| a.chatgpt_account_id.clone())
+            });
             email = claims.email.clone();
         }
     }
 
     if account_id.is_none() {
         if let Some(claims) = parse_jwt_claims(&tokens.access_token) {
-            account_id = claims
-                .chatgpt_account_id
-                .clone()
-                .or_else(|| {
-                    claims
-                        .openai_auth
-                        .as_ref()
-                        .and_then(|a| a.chatgpt_account_id.clone())
-                })
-                .or_else(|| claims.organizations.first().and_then(|o| o.id.clone()));
+            account_id = claims.chatgpt_account_id.clone().or_else(|| {
+                claims
+                    .openai_auth
+                    .as_ref()
+                    .and_then(|a| a.chatgpt_account_id.clone())
+            });
             if email.is_none() {
                 email = claims.email.clone();
             }
@@ -1737,19 +1870,18 @@ mod tests {
     }
 
     #[test]
-    fn test_parse_jwt_claims_organizations_fallback() {
+    fn test_extract_account_metadata_does_not_use_organization_id() {
         let header = URL_SAFE_NO_PAD.encode(b"{\"alg\":\"none\"}");
         let payload = URL_SAFE_NO_PAD.encode(b"{\"organizations\":[{\"id\":\"org-456\"}]}");
         let jwt = format!("{header}.{payload}.");
-        let claims = parse_jwt_claims(&jwt).unwrap();
-        assert_eq!(
-            claims
-                .organizations
-                .first()
-                .and_then(|o| o.id.clone())
-                .as_deref(),
-            Some("org-456")
-        );
+        let tokens = OAuthTokenResponse {
+            access_token: jwt,
+            refresh_token: None,
+            id_token: None,
+            expires_in: None,
+        };
+
+        assert_eq!(extract_account_metadata_from_tokens(&tokens), (None, None));
     }
 
     #[tokio::test]
@@ -1766,11 +1898,11 @@ mod tests {
         let path = temp.path().to_path_buf();
 
         // Manually inject an account through internal methods
-        {
+        let account_id = {
             let manager = CodexOAuthManager::new(path.clone());
-            manager
+            let account = manager
                 .add_account_internal(
-                    "acc-123".to_string(),
+                    "workspace-123".to_string(),
                     "rt-secret".to_string(),
                     Some("user@example.com".to_string()),
                     None,
@@ -1779,13 +1911,191 @@ mod tests {
                 )
                 .await
                 .unwrap();
-        }
+            account.id
+        };
 
         // New manager should load from disk
         let manager2 = CodexOAuthManager::new(path);
         let accounts = manager2.list_accounts().await;
         assert_eq!(accounts.len(), 1);
-        assert_eq!(accounts[0].id, "acc-123");
+        assert_eq!(accounts[0].id, account_id);
+        assert_eq!(
+            manager2
+                .chatgpt_account_id_for_account(&account_id)
+                .await
+                .unwrap(),
+            "workspace-123"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_same_workspace_accounts_are_stored_separately() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().to_path_buf();
+        let manager = CodexOAuthManager::new(path.clone());
+
+        let first = manager
+            .add_account_internal(
+                "shared-workspace".to_string(),
+                "rt-first".to_string(),
+                Some("first@example.com".to_string()),
+                None,
+                None,
+                None,
+            )
+            .await
+            .unwrap();
+        let second = manager
+            .add_account_internal(
+                "shared-workspace".to_string(),
+                "rt-second".to_string(),
+                Some("second@example.com".to_string()),
+                None,
+                None,
+                None,
+            )
+            .await
+            .unwrap();
+
+        assert_ne!(first.id, second.id);
+        assert_eq!(manager.list_accounts().await.len(), 2);
+        assert_eq!(
+            manager
+                .chatgpt_account_id_for_account(&first.id)
+                .await
+                .unwrap(),
+            "shared-workspace"
+        );
+        assert_eq!(
+            manager
+                .chatgpt_account_id_for_account(&second.id)
+                .await
+                .unwrap(),
+            "shared-workspace"
+        );
+
+        let accounts = manager.accounts.read().await;
+        assert_eq!(accounts.get(&first.id).unwrap().refresh_token, "rt-first");
+        assert_eq!(accounts.get(&second.id).unwrap().refresh_token, "rt-second");
+        drop(accounts);
+        drop(manager);
+
+        let manager = CodexOAuthManager::new(path);
+        assert_eq!(manager.list_accounts().await.len(), 2);
+        let accounts = manager.accounts.read().await;
+        assert_eq!(accounts.get(&first.id).unwrap().refresh_token, "rt-first");
+        assert_eq!(accounts.get(&second.id).unwrap().refresh_token, "rt-second");
+    }
+
+    #[tokio::test]
+    async fn test_v1_store_preserves_existing_account_id() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().to_path_buf();
+        let manager = CodexOAuthManager::new(path.clone());
+        let legacy = serde_json::json!({
+            "version": 1,
+            "accounts": {
+                "legacy-workspace": {
+                    "account_id": "legacy-workspace",
+                    "email": "legacy@example.com",
+                    "refresh_token": "rt-legacy",
+                    "authenticated_at": 1
+                }
+            },
+            "default_account_id": "legacy-workspace"
+        });
+        manager
+            .write_store_atomic(&serde_json::to_string(&legacy).unwrap())
+            .unwrap();
+        drop(manager);
+
+        let manager = CodexOAuthManager::new(path.clone());
+        let accounts = manager.list_accounts().await;
+        assert_eq!(accounts.len(), 1);
+        assert_eq!(accounts[0].id, "legacy-workspace");
+        assert!(matches!(
+            manager
+                .chatgpt_account_id_for_account("legacy-workspace")
+                .await,
+            Err(CodexOAuthError::ParseError(_))
+        ));
+
+        let header = URL_SAFE_NO_PAD.encode(b"{\"alg\":\"none\"}");
+        let unresolved_payload =
+            URL_SAFE_NO_PAD.encode(b"{\"organizations\":[{\"id\":\"org-456\"}]}");
+        let unresolved_tokens = OAuthTokenResponse {
+            access_token: format!("{header}.{unresolved_payload}."),
+            refresh_token: Some("rt-rotated".to_string()),
+            id_token: None,
+            expires_in: Some(3600),
+        };
+        {
+            let mut stored = manager.accounts.write().await;
+            assert!(stored
+                .get_mut("legacy-workspace")
+                .unwrap()
+                .apply_refreshed_tokens(&unresolved_tokens));
+        }
+        manager.save_to_disk().await.unwrap();
+        drop(manager);
+
+        let manager = CodexOAuthManager::new(path.clone());
+        assert!(manager
+            .chatgpt_account_id_for_account("legacy-workspace")
+            .await
+            .is_err());
+        assert_eq!(
+            manager
+                .accounts
+                .read()
+                .await
+                .get("legacy-workspace")
+                .unwrap()
+                .refresh_token,
+            "rt-rotated"
+        );
+
+        let payload = URL_SAFE_NO_PAD.encode(
+            b"{\"https://api.openai.com/auth\":{\"chatgpt_account_id\":\"actual-workspace\"}}",
+        );
+        let refreshed_tokens = OAuthTokenResponse {
+            access_token: format!("{header}.{payload}."),
+            refresh_token: None,
+            id_token: None,
+            expires_in: Some(3600),
+        };
+        {
+            let mut stored = manager.accounts.write().await;
+            assert!(stored
+                .get_mut("legacy-workspace")
+                .unwrap()
+                .apply_refreshed_tokens(&refreshed_tokens));
+        }
+        manager.save_to_disk().await.unwrap();
+        drop(manager);
+
+        let manager = CodexOAuthManager::new(path);
+        assert_eq!(
+            manager.default_account_id().await.as_deref(),
+            Some("legacy-workspace")
+        );
+        assert_eq!(
+            manager
+                .chatgpt_account_id_for_account("legacy-workspace")
+                .await
+                .unwrap(),
+            "actual-workspace"
+        );
+        assert_eq!(
+            manager
+                .accounts
+                .read()
+                .await
+                .get("legacy-workspace")
+                .unwrap()
+                .refresh_token,
+            "rt-rotated"
+        );
     }
 
     #[tokio::test]
@@ -1793,7 +2103,7 @@ mod tests {
         let temp = tempfile::tempdir().unwrap();
         let manager = CodexOAuthManager::new(temp.path().to_path_buf());
 
-        manager
+        let first = manager
             .add_account_internal(
                 "acc-123".to_string(),
                 "rt".to_string(),
@@ -1804,7 +2114,7 @@ mod tests {
             )
             .await
             .unwrap();
-        manager
+        let second = manager
             .add_account_internal(
                 "acc-456".to_string(),
                 "rt2".to_string(),
@@ -1816,10 +2126,10 @@ mod tests {
             .await
             .unwrap();
 
-        manager.remove_account("acc-123").await.unwrap();
+        manager.remove_account(&first.id).await.unwrap();
         let accounts = manager.list_accounts().await;
         assert_eq!(accounts.len(), 1);
-        assert_eq!(accounts[0].id, "acc-456");
+        assert_eq!(accounts[0].id, second.id);
     }
 
     #[tokio::test]

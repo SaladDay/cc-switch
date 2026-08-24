@@ -1718,14 +1718,20 @@ impl RequestForwarder {
                         .as_ref()
                         .and_then(|m| m.managed_account_id_for("codex_oauth"));
 
-                    let token_result = match &account_id {
+                    let resolved_account_id = match account_id {
+                        Some(id) => Some(id),
+                        None => codex_auth.default_account_id().await,
+                    };
+
+                    let token_result = match &resolved_account_id {
                         Some(id) => {
                             log::debug!("[CodexOAuth] 使用指定账号 {id} 获取 token");
                             codex_auth.get_valid_token_for_account(id).await
                         }
                         None => {
-                            log::debug!("[CodexOAuth] 使用默认账号获取 token");
-                            codex_auth.get_valid_token().await
+                            return Err(ProxyError::AuthError(
+                                "Codex OAuth 认证失败: 无可用的 ChatGPT 账号".to_string(),
+                            ));
                         }
                     };
 
@@ -1733,10 +1739,19 @@ impl RequestForwarder {
                         Ok(token) => {
                             auth = AuthInfo::new(token, AuthStrategy::CodexOAuth);
                             should_send_codex_oauth_session_headers = true;
-                            // 解析使用的 account_id（用于注入 ChatGPT-Account-Id header）
-                            codex_oauth_account_id = match account_id {
-                                Some(id) => Some(id),
-                                None => codex_auth.default_account_id().await,
+                            // 本地账号 ID 只用于绑定；请求头必须使用上游 workspace ID。
+                            codex_oauth_account_id = match resolved_account_id.as_deref() {
+                                Some(id) => Some(
+                                    codex_auth
+                                        .chatgpt_account_id_for_account(id)
+                                        .await
+                                        .map_err(|e| {
+                                            ProxyError::AuthError(format!(
+                                                "Codex OAuth 账号解析失败: {e}"
+                                            ))
+                                        })?,
+                                ),
+                                None => None,
                             };
                             log::debug!(
                                 "[CodexOAuth] 成功获取 access_token (account={})",
@@ -1806,13 +1821,6 @@ impl RequestForwarder {
         } else {
             Vec::new()
         };
-
-        // 注入 Codex OAuth 的 ChatGPT-Account-Id header（如果有 account_id）
-        if let Some(ref account_id) = codex_oauth_account_id {
-            if let Ok(hv) = http::HeaderValue::from_str(account_id) {
-                auth_headers.push((http::HeaderName::from_static("chatgpt-account-id"), hv));
-            }
-        }
 
         let codex_oauth_session_headers =
             if should_send_codex_oauth_session_headers && self.session_client_provided {
@@ -2204,6 +2212,13 @@ impl RequestForwarder {
                 .and_then(|meta| meta.local_proxy_request_overrides.as_ref()),
             is_copilot,
         );
+
+        // 托管 OAuth 的 workspace 由账号绑定决定，覆盖客户端或本地代理配置的旧值。
+        if let Some(ref account_id) = codex_oauth_account_id {
+            if let Ok(value) = http::HeaderValue::from_str(account_id) {
+                ordered_headers.insert("chatgpt-account-id", value);
+            }
+        }
 
         reject_proxy_placeholder_for_managed_account_upstream(&url, &ordered_headers)?;
 

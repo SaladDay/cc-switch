@@ -488,38 +488,30 @@ fn extract_codex_auth_user_identity(auth: &Value) -> Option<String> {
     extract_codex_id_token_user_identity(id_token)
 }
 
-fn extract_codex_id_token_user_identity(id_token: &str) -> Option<String> {
-    let claims: Value = match id_token
-        .split('.')
-        .nth(1)
-        .and_then(|payload| URL_SAFE_NO_PAD.decode(payload).ok())
-        .and_then(|decoded| serde_json::from_slice(&decoded).ok())
-    {
-        Some(claims) => claims,
+pub(crate) fn extract_codex_id_token_user_identity(id_token: &str) -> Option<String> {
+    match extract_codex_id_token_subject(id_token) {
+        Some(subject) => Some(format!("sub:{subject}")),
         None => {
             #[cfg(test)]
             return Some("test-user".to_string());
             #[cfg(not(test))]
             return None;
         }
-    };
-    let chatgpt_user_id = claims
-        .get("https://api.openai.com/auth")
-        .and_then(Value::as_object)
-        .and_then(|claim| claim.get("chatgpt_user_id"))
-        .and_then(Value::as_str)
-        .or_else(|| claims.get("chatgpt_user_id").and_then(Value::as_str))
-        .map(str::trim)
-        .filter(|value| !value.is_empty());
-    if let Some(user_id) = chatgpt_user_id {
-        return Some(format!("chatgpt_user_id:{user_id}"));
     }
+}
+
+pub(crate) fn extract_codex_id_token_subject(id_token: &str) -> Option<String> {
+    let claims: Value = id_token
+        .split('.')
+        .nth(1)
+        .and_then(|payload| URL_SAFE_NO_PAD.decode(payload).ok())
+        .and_then(|decoded| serde_json::from_slice(&decoded).ok())?;
     claims
         .get("sub")
         .and_then(Value::as_str)
         .map(str::trim)
         .filter(|value| !value.is_empty())
-        .map(|subject| format!("sub:{subject}"))
+        .map(str::to_string)
 }
 
 #[cfg(test)]
@@ -617,6 +609,21 @@ fn migrate_legacy_codex_managed_oauth_live_auth_marker(
     record_codex_managed_oauth_live_auth(auth, managed_account_id)
 }
 
+/// Before removing a manager record, make any legacy live-auth ownership
+/// provable with the manager's persisted user identity. Failure is surfaced so
+/// callers keep the manager record and marker instead of orphaning auth.json.
+pub(crate) fn prepare_codex_live_auth_for_managed_account_removal(
+    managed_account_id: &str,
+    managed_id_token: Option<&str>,
+) -> Result<(), AppError> {
+    let auth_path = get_codex_auth_path();
+    if !auth_path.exists() {
+        return Ok(());
+    }
+    let auth: Value = read_json_file(&auth_path)?;
+    migrate_legacy_codex_managed_oauth_live_auth_marker(&auth, managed_account_id, managed_id_token)
+}
+
 pub fn codex_auth_matches_recorded_managed_oauth(
     auth: &Value,
     account_id: &str,
@@ -657,6 +664,29 @@ pub fn codex_auth_matches_recorded_managed_oauth(
             }
             _ => false,
         })
+}
+
+/// Verify that a proxied Codex request still uses the exact live access token
+/// owned by the selected local account. Workspace IDs alone are not sufficient:
+/// different Team users can share one value.
+pub(crate) fn codex_live_auth_matches_managed_request(
+    account_id: &str,
+    request_access_token: &str,
+) -> Result<bool, AppError> {
+    let auth_path = get_codex_auth_path();
+    if !auth_path.exists() {
+        return Ok(false);
+    }
+    let auth: Value = read_json_file(&auth_path)?;
+    if !codex_auth_matches_recorded_managed_oauth(&auth, account_id)? {
+        return Ok(false);
+    }
+    let live_access_token = auth
+        .pointer("/tokens/access_token")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|token| !token.is_empty());
+    Ok(live_access_token == Some(request_access_token.trim()))
 }
 
 fn clear_codex_managed_oauth_live_auth_marker_for_account(
@@ -3632,12 +3662,25 @@ base_url = "https://single.example.com/v1"
     #[serial]
     fn managed_chatgpt_login_matches_local_marker_and_workspace() {
         let _home = CodexLiveTestHome::new();
+        let shared_chatgpt_user_token = |subject: &str| {
+            let header = URL_SAFE_NO_PAD.encode(br#"{"alg":"none"}"#);
+            let payload = URL_SAFE_NO_PAD.encode(
+                json!({
+                    "sub": subject,
+                    "https://api.openai.com/auth": {
+                        "chatgpt_user_id": "shared-team-user-id"
+                    }
+                })
+                .to_string(),
+            );
+            format!("{header}.{payload}.")
+        };
         // 原生 auth 保留 workspace ID；marker 用本地 ID 区分同 workspace 登录。
         let full_bundle = json!({
             "auth_mode": "chatgpt",
             "OPENAI_API_KEY": null,
             "tokens": {
-                "id_token": test_codex_id_token("user-a"),
+                "id_token": shared_chatgpt_user_token("user-a"),
                 "access_token": "access",
                 "refresh_token": "refresh-secret",
                 "account_id": "workspace-shared"
@@ -3646,6 +3689,16 @@ base_url = "https://single.example.com/v1"
         });
         record_codex_managed_oauth_live_auth(&full_bundle, "local-account-a")
             .expect("record managed auth marker");
+        crate::config::write_json_file(&get_codex_auth_path(), &full_bundle)
+            .expect("write managed live auth");
+        assert!(
+            codex_live_auth_matches_managed_request("local-account-a", "access").unwrap(),
+            "the selected account's exact live bearer must match"
+        );
+        assert!(
+            !codex_live_auth_matches_managed_request("local-account-a", "other-access").unwrap(),
+            "another user's bearer in the same workspace must not match"
+        );
         let managed_id_token = full_bundle
             .pointer("/tokens/id_token")
             .and_then(Value::as_str)
@@ -3659,7 +3712,7 @@ base_url = "https://single.example.com/v1"
             "another local login in the same workspace must not match"
         );
         let mut other_user = full_bundle.clone();
-        other_user["tokens"]["id_token"] = json!(test_codex_id_token("user-b"));
+        other_user["tokens"]["id_token"] = json!(shared_chatgpt_user_token("user-b"));
         assert!(
             !codex_live_auth_is_managed_chatgpt_login(&other_user, "local-account-a"),
             "a native login for another user in the same workspace must not match"
@@ -3770,6 +3823,46 @@ base_url = "https://single.example.com/v1"
             &restored,
             "legacy-workspace"
         ));
+    }
+
+    #[test]
+    #[serial]
+    fn legacy_managed_marker_removal_requires_manager_identity() {
+        let _home = CodexLiveTestHome::new();
+        let id_token = test_codex_id_token("legacy-user");
+        let auth = codex_managed_oauth_auth_value(
+            "legacy-workspace",
+            "access",
+            Some(&id_token),
+            "refresh",
+            "2026-01-01T00:00:00Z",
+        );
+        crate::config::write_json_file(&get_codex_auth_path(), &auth)
+            .expect("write legacy live auth");
+        crate::config::write_json_file(
+            &get_codex_managed_oauth_live_auth_marker_path(),
+            &json!({
+                "version": 2,
+                "account_id": "legacy-workspace"
+            }),
+        )
+        .expect("write legacy marker");
+
+        let other_user = test_codex_id_token("other-user");
+        assert!(prepare_codex_live_auth_for_managed_account_removal(
+            "legacy-workspace",
+            Some(&other_user),
+        )
+        .is_err());
+        assert!(get_codex_auth_path().exists());
+        assert!(get_codex_managed_oauth_live_auth_marker_path().exists());
+
+        prepare_codex_live_auth_for_managed_account_removal("legacy-workspace", Some(&id_token))
+            .expect("prove and migrate legacy ownership");
+        clear_codex_live_auth_for_managed_account("legacy-workspace")
+            .expect("remove proven managed live auth");
+        assert!(!get_codex_auth_path().exists());
+        assert!(!get_codex_managed_oauth_live_auth_marker_path().exists());
     }
 
     #[test]

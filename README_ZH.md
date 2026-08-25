@@ -588,7 +588,7 @@ pnpm test:unit --coverage
 - 通过格式检查：`pnpm format:check`
 - 通过单元测试：`pnpm test:unit`
 
-开始写代码前，请先阅读 [Pull Request 指南](./CONTRIBUTING.md#pull-request-指南)。首次提交代码及新增长期集成都必须事先获得维护者确认。
+开始实现新功能或长期集成前，请先阅读 [Pull Request 指南](./CONTRIBUTING.md#pull-request-指南)。新功能需要先在 Issue 中讨论；新增受管应用、供应商系列、协议桥接、harness 集成及其他同类长期集成必须获得维护者明确确认。提交 Issue 报告本身不需要许可。
 
 ## Star History
 

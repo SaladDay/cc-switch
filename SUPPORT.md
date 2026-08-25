@@ -25,7 +25,7 @@ CC Switch is an open-source project maintained by volunteers. We're happy to hel
 ### Feature Requests
 
 - [Submit a Feature Request](https://github.com/farion1231/cc-switch/issues/new?template=feature_request.yml)
-- Please open an issue for discussion before submitting a PR for new features.
+- Please discuss new features in an issue before implementing them. Read the [Pull Request Guidelines](./CONTRIBUTING.md#pull-request-guidelines); reporting an idea does not require permission, and new managed applications, provider families, protocol bridges, harness integrations, and comparable long-lived integrations require explicit maintainer confirmation.
 
 ---
 
@@ -56,4 +56,4 @@ CC Switch 是一个由志愿者维护的开源项目。我们很乐意提供帮�
 ### 功能请求
 
 - [提交功能请求](https://github.com/farion1231/cc-switch/issues/new?template=feature_request.yml)
-- 提交新功能的 PR 之前，请先开 Issue 讨论。
+- 实现新功能前，请先在 Issue 中讨论。请阅读 [Pull Request 指南](./CONTRIBUTING.md#pull-request-指南)；提交想法本身不需要许可，新增受管应用、供应商系列、协议桥接、harness 集成或其他同类长期集成必须获得维护者明确确认。

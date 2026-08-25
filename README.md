@@ -585,7 +585,7 @@ Before submitting PRs, please ensure:
 - Pass format check: `pnpm format:check`
 - Pass unit tests: `pnpm test:unit`
 
-Before writing code, read the [Pull Request Guidelines](./CONTRIBUTING.md#pull-request-guidelines). First-time code contributors and long-lived integrations require prior maintainer confirmation.
+Before implementing a new feature or long-lived integration, read the [Pull Request Guidelines](./CONTRIBUTING.md#pull-request-guidelines). New features require issue discussion; new managed applications, provider families, protocol bridges, harness integrations, and comparable long-lived integrations require explicit maintainer confirmation. Reporting an issue does not require permission.
 
 ## Star History
 

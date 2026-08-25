@@ -585,7 +585,7 @@ PR を送る前に以下をご確認ください：
 - フォーマットチェック: `pnpm format:check`
 - 単体テスト: `pnpm test:unit`
 
-コードを書き始める前に、[Pull Request Guidelines](./CONTRIBUTING.md#pull-request-guidelines) を確認してください。初めてのコード貢献と長期的な保守が必要な統合には、事前にメンテナーの確認が必要です。
+新機能や長期的な統合の実装を始める前に、[Pull Request Guidelines](./CONTRIBUTING.md#pull-request-guidelines) を確認してください。新機能はまず Issue で議論する必要があります。新しい管理対象アプリ、プロバイダーファミリー、プロトコルブリッジ、Harness 統合、および同様の長期保守が必要な統合には、メンテナーの明示的な確認が必要です。Issue の報告自体に許可は必要ありません。
 
 ## Star History
 

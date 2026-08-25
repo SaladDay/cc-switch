@@ -12,9 +12,9 @@ There are many ways to contribute:
 - **Suggest features** — Have an idea? [Submit a feature request](https://github.com/farion1231/cc-switch/issues/new?template=feature_request.yml).
 - **Improve docs** — Spot a typo or missing info? [Report a doc issue](https://github.com/farion1231/cc-switch/issues/new?template=doc_issue.yml).
 - **Contribute code** — Fix bugs or implement features via pull requests.
-- **Translate** — Help us improve translations for English, Chinese, and Japanese.
+- **Translate** — Help us improve translations for English, Simplified Chinese, Traditional Chinese, and Japanese.
 
-> **Before writing code:** Read the [Pull Request Guidelines](#pull-request-guidelines). First-time code contributors, and anyone proposing a new managed application, provider family, protocol bridge, harness integration, or comparable long-lived integration, must receive maintainer confirmation of the direction and scope first.
+> **Before writing code:** Read the [Pull Request Guidelines](#pull-request-guidelines). New features require an issue discussion before implementation. First-time code contributors may start ordinary work only when the issue is explicitly marked `help wanted` or `good first issue`; new managed applications, provider families, protocol bridges, harness integrations, and comparable long-lived integrations require explicit maintainer confirmation. Reporting an issue does not require permission to do so.
 
 > **Security vulnerabilities**: Please do NOT use public issues. See our [Security Policy](./SECURITY.md) instead.
 
@@ -80,7 +80,9 @@ cd src-tauri && cargo fmt --check && cargo clippy && cargo test
 
 ## Pull Request Guidelines
 
-1. **Discuss work first when required** — First-time code contributors must open an issue and wait for a maintainer to confirm the direction and scope before writing code. For security fixes, use the private reporting channel in the [Security Policy](./SECURITY.md) instead; a private advisory with explicit maintainer confirmation satisfies this rule, and vulnerability details must not be posted in a public issue. The same prior discussion and confirmation are required for every new managed application, provider family, protocol bridge, harness integration, or comparable long-lived integration. This discussion helps contributors avoid spending time on work the project cannot accept; it is not a promise that the eventual PR will be merged.
+1. **Discuss work first when required** — New features must be discussed in an issue before implementation. First-time code contributors must wait for a maintainer to confirm the direction and scope unless the issue is explicitly marked `help wanted` or `good first issue` for ordinary, in-scope work. New managed applications, provider families, protocol bridges, harness integrations, and comparable long-lived integrations always require explicit confirmation, regardless of contributor history or issue labels. For security fixes, use the private reporting channel in the [Security Policy](./SECURITY.md) instead; a private advisory with explicit maintainer confirmation satisfies this rule, and vulnerability details must not be posted in a public issue. This discussion helps contributors avoid spending time on work the project cannot accept; it is not a promise that the eventual PR will be merged.
+   - A `contribution-approved` label or an explicit maintainer comment confirms the direction and scope. `needs-design`, `needs review`, `blocked`, and silence do not count as approval.
+   - If the implementation materially changes the agreed scope or non-goals, pause and request confirmation again. A polite follow-up is welcome; no response is not approval.
 2. **Fork and branch** — Create a feature branch from `main` (e.g., `feat/my-feature` or `fix/issue-123`).
 3. **Keep PRs focused** — One feature or fix per PR. Avoid unrelated changes.
 4. **Follow the PR template** — Fill in the summary, related issue, and checklist.
@@ -120,12 +122,13 @@ By submitting a PR, you agree to the following:
 
 ## Internationalization (i18n)
 
-CC Switch supports three languages. When modifying user-facing text:
+CC Switch supports four UI locales. When modifying user-facing text:
 
-1. Update **all three** locale files:
-   - `src/locales/en/translation.json`
-   - `src/locales/zh/translation.json`
-   - `src/locales/ja/translation.json`
+1. Update **all four** locale files:
+   - `src/i18n/locales/en.json`
+   - `src/i18n/locales/ja.json`
+   - `src/i18n/locales/zh.json`
+   - `src/i18n/locales/zh-TW.json`
 2. Use the `t()` function from i18next for all UI text.
 3. Never hardcode user-facing strings.
 
@@ -150,9 +153,9 @@ CC Switch supports three languages. When modifying user-facing text:
 - **建议功能** — 有想法？[提交功能请求](https://github.com/farion1231/cc-switch/issues/new?template=feature_request.yml)。
 - **改进文档** — 发现错误或缺失？[报告文档问题](https://github.com/farion1231/cc-switch/issues/new?template=doc_issue.yml)。
 - **贡献代码** — 通过 Pull Request 修复 Bug 或实现新功能。
-- **翻译** — 帮助改进英文、中文和日文的翻译。
+- **翻译** — 帮助改进英文、简体中文、繁体中文和日文翻译。
 
-> **开始写代码之前：** 请先阅读 [Pull Request 指南](#pull-request-指南)。首次提交代码的贡献者，以及计划新增受管应用、供应商系列、协议桥接、harness 集成或其他同类长期集成的贡献者，都必须先获得维护者对方向和范围的确认。
+> **开始写代码之前：** 请先阅读 [Pull Request 指南](#pull-request-指南)。新功能必须先在 Issue 中讨论。首次向本项目提交代码的贡献者，只有在 Issue 明确标记为 `help wanted` 或 `good first issue` 且属于普通、已限定范围的任务时，才可以直接开始；新增受管应用、供应商系列、协议桥接、harness 集成或其他同类长期集成，必须获得维护者明确确认。提交 Issue 报告本身不需要许可。
 
 > **安全漏洞**：请不要使用公开 Issue 报告。请参阅我们的[安全策略](./SECURITY.md)。
 
@@ -216,7 +219,9 @@ cd src-tauri && cargo fmt --check && cargo clippy && cargo test
 
 ## Pull Request 指南
 
-1. **需要时先讨论** — 首次提交代码的贡献者，在开始写代码之前，必须先开 Issue，并等待维护者确认方向和范围。安全修复应改用[安全策略](./SECURITY.md)中的私下报告渠道；私密安全公告及维护者的明确确认可满足此规则，漏洞细节不得发布到公开 Issue。任何新增受管应用、供应商系列、协议桥接、harness 集成或其他同类长期集成，无论贡献者是否首次参与，都同样需要事先讨论并获得确认。提前讨论是为了避免贡献者把时间花在项目无法接受的方案上，并不代表最终 PR 一定会合并。
+1. **需要时先讨论** — 新功能必须先在 Issue 中讨论。首次向本项目提交代码的贡献者，除非 Issue 明确标记为 `help wanted` 或 `good first issue` 且属于普通、已限定范围的任务，否则必须等待维护者确认方向和范围。任何新增受管应用、供应商系列、协议桥接、harness 集成或其他同类长期集成，无论贡献者是否首次参与，都必须获得维护者明确确认。安全修复应改用[安全策略](./SECURITY.md)中的私下报告渠道；私密安全公告及维护者的明确确认可满足此规则，漏洞细节不得发布到公开 Issue。提前讨论是为了避免贡献者把时间花在项目无法接受的方案上，并不代表最终 PR 一定会合并。
+   - `contribution-approved` 标签或维护者明确评论可确认方向和范围；`needs-design`、`needs review`、`blocked` 和没有回复均不算批准。
+   - 如果实现实质改变了已确认的范围或非目标，请暂停并再次确认。可以礼貌 follow-up，但没有回复不等于批准。
 2. **Fork 并创建分支** — 从 `main` 创建功能分支（如 `feat/my-feature` 或 `fix/issue-123`）。
 3. **保持 PR 专注** — 每个 PR 只做一件事，避免无关改动。
 4. **遵循 PR 模板** — 填写概述、关联 Issue 和检查清单。
@@ -256,12 +261,13 @@ chore(deps): update dependencies
 
 ## 国际化（i18n）
 
-CC Switch 支持三种语言。修改用户可见文本时：
+CC Switch 支持四种 UI locale。修改用户可见文本时：
 
-1. **同时更新三个**语言文件：
-   - `src/locales/en/translation.json`
-   - `src/locales/zh/translation.json`
-   - `src/locales/ja/translation.json`
+1. **同时更新四个**语言文件：
+   - `src/i18n/locales/en.json`
+   - `src/i18n/locales/ja.json`
+   - `src/i18n/locales/zh.json`
+   - `src/i18n/locales/zh-TW.json`
 2. 所有 UI 文本使用 i18next 的 `t()` 函数。
 3. 不要硬编码用户可见的字符串。
 

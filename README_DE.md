@@ -585,7 +585,7 @@ Bitte stellen Sie vor dem Einreichen von PRs Folgendes sicher:
 - Formatprüfung besteht: `pnpm format:check`
 - Unit-Tests bestehen: `pnpm test:unit`
 
-Lesen Sie vor Beginn der Implementierung die [Pull Request Guidelines](./CONTRIBUTING.md#pull-request-guidelines). Erstmalige Codebeiträge und langfristig zu pflegende Integrationen erfordern vorab die Bestätigung eines Maintainers.
+Lesen Sie vor der Implementierung neuer Funktionen oder langfristiger Integrationen die [Pull Request Guidelines](./CONTRIBUTING.md#pull-request-guidelines). Neue Funktionen müssen zunächst in einem Issue besprochen werden; neue verwaltete Anwendungen, Provider-Familien, Protokollbrücken, Harness-Integrationen und vergleichbare langfristige Integrationen erfordern die ausdrückliche Bestätigung eines Maintainers. Das Melden eines Issues erfordert keine Genehmigung.
 
 ## Star History
 

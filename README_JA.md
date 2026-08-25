@@ -585,7 +585,7 @@ PR を送る前に以下をご確認ください：
 - フォーマットチェック: `pnpm format:check`
 - 単体テスト: `pnpm test:unit`
 
-新機能の場合は、PR を送る前に Issue でディスカッションしてください。プロジェクトに合わない機能の PR はクローズされる場合があります。
+コードを書き始める前に、[Pull Request Guidelines](./CONTRIBUTING.md#pull-request-guidelines) を確認してください。初めてのコード貢献と長期的な保守が必要な統合には、事前にメンテナーの確認が必要です。
 
 ## Star History
 

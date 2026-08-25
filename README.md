@@ -585,7 +585,7 @@ Before submitting PRs, please ensure:
 - Pass format check: `pnpm format:check`
 - Pass unit tests: `pnpm test:unit`
 
-For new features, please open an issue for discussion before submitting a PR. PRs for features that are not a good fit for the project may be closed.
+Before writing code, read the [Pull Request Guidelines](./CONTRIBUTING.md#pull-request-guidelines). First-time code contributors and long-lived integrations require prior maintainer confirmation.
 
 ## Star History
 

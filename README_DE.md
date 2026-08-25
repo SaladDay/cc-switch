@@ -585,7 +585,7 @@ Bitte stellen Sie vor dem Einreichen von PRs Folgendes sicher:
 - Formatprüfung besteht: `pnpm format:check`
 - Unit-Tests bestehen: `pnpm test:unit`
 
-Eröffnen Sie für neue Funktionen bitte vor dem Einreichen eines PR ein Issue zur Diskussion. PRs für Funktionen, die nicht gut zum Projekt passen, können geschlossen werden.
+Lesen Sie vor Beginn der Implementierung die [Pull Request Guidelines](./CONTRIBUTING.md#pull-request-guidelines). Erstmalige Codebeiträge und langfristig zu pflegende Integrationen erfordern vorab die Bestätigung eines Maintainers.
 
 ## Star History
 

@@ -14,6 +14,8 @@ There are many ways to contribute:
 - **Contribute code** — Fix bugs or implement features via pull requests.
 - **Translate** — Help us improve translations for English, Chinese, and Japanese.
 
+> **Before writing code:** Read the [Pull Request Guidelines](#pull-request-guidelines). First-time code contributors, and anyone proposing a new managed application, provider family, protocol bridge, harness integration, or comparable long-lived integration, must receive maintainer confirmation of the direction and scope first.
+
 > **Security vulnerabilities**: Please do NOT use public issues. See our [Security Policy](./SECURITY.md) instead.
 
 ## Development Setup
@@ -78,7 +80,7 @@ cd src-tauri && cargo fmt --check && cargo clippy && cargo test
 
 ## Pull Request Guidelines
 
-1. **Open an issue first** for new features — PRs for features that are not a good fit may be closed.
+1. **Discuss work first when required** — First-time code contributors must open an issue and wait for a maintainer to confirm the direction and scope before writing code. For security fixes, use the private reporting channel in the [Security Policy](./SECURITY.md) instead; a private advisory with explicit maintainer confirmation satisfies this rule, and vulnerability details must not be posted in a public issue. The same prior discussion and confirmation are required for every new managed application, provider family, protocol bridge, harness integration, or comparable long-lived integration. This discussion helps contributors avoid spending time on work the project cannot accept; it is not a promise that the eventual PR will be merged.
 2. **Fork and branch** — Create a feature branch from `main` (e.g., `feat/my-feature` or `fix/issue-123`).
 3. **Keep PRs focused** — One feature or fix per PR. Avoid unrelated changes.
 4. **Follow the PR template** — Fill in the summary, related issue, and checklist.
@@ -111,7 +113,7 @@ By submitting a PR, you agree to the following:
 1. **You have read and understood your code.** You must be able to explain any line in your PR. If you cannot, it is not ready for review.
 2. **You have tested it yourself.** Every change must be verified locally — not just "it looks right." Do not submit code for platforms or features you cannot test.
 3. **PRs must be small and focused.** One issue, one PR. Large, sprawling, multi-topic PRs will be closed.
-4. **Open an issue first.** Drive-by PRs with no prior discussion — especially AI-generated ones — may be closed without review.
+4. **Follow the pre-implementation discussion rule.** AI assistance does not bypass the [Pull Request Guidelines](#pull-request-guidelines). If those guidelines require prior maintainer confirmation, do not begin implementation without it.
 5. **Maintainers may close without explanation.** PRs that appear to be unreviewed AI output — hallucinated fixes, unnecessary refactors, bulk changes with no context — may be closed at the maintainer's discretion.
 
 **In short**: AI is a tool, not a substitute for understanding. Use it to help you contribute better, not to shift work onto maintainers.
@@ -149,6 +151,8 @@ CC Switch supports three languages. When modifying user-facing text:
 - **改进文档** — 发现错误或缺失？[报告文档问题](https://github.com/farion1231/cc-switch/issues/new?template=doc_issue.yml)。
 - **贡献代码** — 通过 Pull Request 修复 Bug 或实现新功能。
 - **翻译** — 帮助改进英文、中文和日文的翻译。
+
+> **开始写代码之前：** 请先阅读 [Pull Request 指南](#pull-request-指南)。首次提交代码的贡献者，以及计划新增受管应用、供应商系列、协议桥接、harness 集成或其他同类长期集成的贡献者，都必须先获得维护者对方向和范围的确认。
 
 > **安全漏洞**：请不要使用公开 Issue 报告。请参阅我们的[安全策略](./SECURITY.md)。
 
@@ -212,7 +216,7 @@ cd src-tauri && cargo fmt --check && cargo clippy && cargo test
 
 ## Pull Request 指南
 
-1. **先开 Issue 讨论** — 新功能请先开 Issue，不适合项目方向的 PR 可能会被关闭。
+1. **需要时先讨论** — 首次提交代码的贡献者，在开始写代码之前，必须先开 Issue，并等待维护者确认方向和范围。安全修复应改用[安全策略](./SECURITY.md)中的私下报告渠道；私密安全公告及维护者的明确确认可满足此规则，漏洞细节不得发布到公开 Issue。任何新增受管应用、供应商系列、协议桥接、harness 集成或其他同类长期集成，无论贡献者是否首次参与，都同样需要事先讨论并获得确认。提前讨论是为了避免贡献者把时间花在项目无法接受的方案上，并不代表最终 PR 一定会合并。
 2. **Fork 并创建分支** — 从 `main` 创建功能分支（如 `feat/my-feature` 或 `fix/issue-123`）。
 3. **保持 PR 专注** — 每个 PR 只做一件事，避免无关改动。
 4. **遵循 PR 模板** — 填写概述、关联 Issue 和检查清单。
@@ -245,7 +249,7 @@ chore(deps): update dependencies
 1. **你已阅读并理解了你的代码。** 你必须能解释 PR 中的每一行。如果做不到，说明还没准备好提交 review。
 2. **你已亲自测试过。** 每个改动都必须在本地验证——而不是"看起来对"。不要提交你自己无法测试的平台或功能的代码。
 3. **PR 必须小而聚焦。** 一个 Issue 对应一个 PR。大而散、跨多个主题的 PR 会被直接关闭。
-4. **先开 Issue 讨论。** 没有事先讨论的"路过式 PR"——尤其是 AI 生成的——可能会被直接关闭。
+4. **遵循开发前讨论规则。** AI 辅助不会绕过上面的 Pull Request 指南。其中要求事先获得维护者确认的改动，没有确认就不要开始实现。
 5. **维护者可以直接关闭。** 看起来是未经审阅的 AI 产出的 PR——虚构的修复、不必要的重构、缺乏上下文的批量改动——维护者可自行决定关闭。
 
 **一句话总结**：AI 是工具，不是理解力的替代品。用它来帮助你更好地贡献，而不是把工作转移给维护者。

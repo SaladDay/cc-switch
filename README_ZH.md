@@ -588,7 +588,7 @@ pnpm test:unit --coverage
 - 通过格式检查：`pnpm format:check`
 - 通过单元测试：`pnpm test:unit`
 
-新功能开发前，欢迎先开 Issue 讨论实现方案，不适合项目的功能性 PR 有可能会被关闭。
+开始写代码前，请先阅读 [Pull Request 指南](./CONTRIBUTING.md#pull-request-指南)。首次提交代码及新增长期集成都必须事先获得维护者确认。
 
 ## Star History
 

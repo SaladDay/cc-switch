@@ -18,6 +18,13 @@ body:
             我已搜索过[已有的 Issue](https://github.com/farion1231/cc-switch/issues)，包括已关闭的。
           required: true
 
+  - type: markdown
+    attributes:
+      value: |
+        > **Planning to implement this request? / 计划参与实现？**
+        > First-time code contributors must wait for a maintainer to confirm the direction and scope before writing code. New managed applications, provider families, protocol bridges, harness integrations, and comparable long-lived integrations always require prior confirmation. See the [Pull Request Guidelines](https://github.com/farion1231/cc-switch/blob/main/CONTRIBUTING.md#pull-request-guidelines).
+        > 首次提交代码的贡献者，在开始写代码之前，必须等待维护者确认方向和范围。新增受管应用、供应商系列、协议桥接、harness 集成及其他同类长期集成始终需要事先确认。请参阅 [Pull Request 指南](https://github.com/farion1231/cc-switch/blob/main/CONTRIBUTING.md#pull-request-指南)。
+
   - type: dropdown
     attributes:
       label: Related App / 涉及应用

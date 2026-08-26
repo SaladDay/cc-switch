@@ -11,10 +11,11 @@ Fixes #
 
 ## Contribution Policy / 贡献政策
 
-<!-- If this change requires prior discussion, link the Issue above and verify the approval signal before implementation. / 如本次改动需要事先讨论，请在上方关联 Issue，并在开始实现前确认批准信号。 -->
+<!-- If prior discussion is required, link the Issue above. For security work, use a private advisory and do not disclose vulnerability details here. / 如需事先讨论，请在上方关联 Issue。安全相关工作请使用私有安全公告，不要在此披露漏洞细节。 -->
 
-- [ ] If prior confirmation is required, the related Issue has a `contribution-approved` label or an explicit maintainer confirmation / 如需事先确认，关联 Issue 已有 `contribution-approved` 标签或维护者明确确认
-- [ ] This PR stays within the confirmed scope and non-goals / 本 PR 未超出已确认的范围和非目标
+- [ ] Required prior discussion happened in the related Issue, or privately for security work (if applicable) / 如适用，已在关联 Issue 中完成事先讨论，安全相关工作则已私下讨论
+- [ ] The applicable confirmation signal described in `CONTRIBUTING.md` was received (if required) / 如需事先确认，已获得 `CONTRIBUTING.md` 规定的适用确认信号
+- [ ] This PR stays within the confirmed scope and non-goals (if confirmation was required) / 如需事先确认，本 PR 未超出已确认的范围和非目标
 
 ## Screenshots / 截图
 
@@ -28,7 +29,5 @@ Fixes #
 
 - [ ] `pnpm typecheck` passes / 通过 TypeScript 类型检查
 - [ ] `pnpm format:check` passes / 通过代码格式检查
-- [ ] `pnpm test:unit` passes (if frontend or runtime behavior changed) / `pnpm test:unit` 通过（如修改了前端或运行时行为）
 - [ ] `cargo clippy` passes (if Rust code changed) / 通过 Clippy 检查（如修改了 Rust 代码）
-- [ ] `cargo test` passes (if Rust code changed) / `cargo test` 通过（如修改了 Rust 代码）
 - [ ] Updated i18n files if user-facing text changed / 如修改了用户可见文本，已更新国际化文件

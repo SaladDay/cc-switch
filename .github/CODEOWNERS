@@ -11,6 +11,4 @@
 # Most sensitive paths — CI/signing/release and the Rust backend. Listed
 # explicitly so they stay locked even if the global rule above is relaxed later.
 /.github/         @farion1231
-/AGENTS.md        @farion1231
-/CLAUDE.md        @farion1231
 /src-tauri/       @farion1231

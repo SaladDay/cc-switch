@@ -166,15 +166,7 @@ fn apply_kimi_for_coding_context_defaults(settings: &mut Value, provider: &Provi
 }
 
 pub(crate) fn sanitize_claude_settings_for_live(settings: &Value) -> Value {
-    let mut v = settings.clone();
-    if let Some(obj) = v.as_object_mut() {
-        // Internal-only fields - never write to Claude Code settings.json
-        obj.remove("api_format");
-        obj.remove("apiFormat");
-        obj.remove("openrouter_compat_mode");
-        obj.remove("openrouterCompatMode");
-    }
-    v
+    cc_switch_core::claude::prepare_live_settings(settings)
 }
 
 pub(crate) fn provider_exists_in_live_config(

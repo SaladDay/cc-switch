@@ -834,9 +834,11 @@ dependencies = [
 [[package]]
 name = "cc-switch-core"
 version = "0.1.0-alpha.1"
-source = "git+https://github.com/SaladDay/cc-switch-core?rev=0651b5b30adf1f87123df37d3d5748a07784363a#0651b5b30adf1f87123df37d3d5748a07784363a"
+source = "git+https://github.com/SaladDay/cc-switch-core?rev=e4965e6d6b35868fa8a2ce99dbba9e20bfffa063#e4965e6d6b35868fa8a2ce99dbba9e20bfffa063"
 dependencies = [
  "serde",
+ "serde_json",
+ "thiserror 2.0.18",
 ]
 
 [[package]]

@@ -23,7 +23,7 @@ test-hooks = []
 tauri-build = { version = "2.4.0", features = [] }
 
 [dependencies]
-cc-switch-core = { git = "https://github.com/SaladDay/cc-switch-core", rev = "e4965e6d6b35868fa8a2ce99dbba9e20bfffa063" }
+cc-switch-core = { git = "https://github.com/SaladDay/cc-switch-core", rev = "67ad9ce55af18e6018b516ec633e51bfdb8ecc51" }
 serde_json = { version = "1.0", features = ["preserve_order"] }
 serde = { version = "1.0", features = ["derive"] }
 log = "0.4"

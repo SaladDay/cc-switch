@@ -768,6 +768,7 @@ dependencies = [
  "base64 0.22.1",
  "brotli 7.0.0",
  "bytes",
+ "cc-switch-core",
  "chrono",
  "dirs 5.0.1",
  "flate2",
@@ -828,6 +829,16 @@ dependencies = [
  "winreg 0.52.0",
  "zip 2.4.2",
  "zstd",
+]
+
+[[package]]
+name = "cc-switch-core"
+version = "0.1.0"
+source = "git+https://github.com/SaladDay/cc-switch-core?rev=14fd610b5e25c4b1b431eda0e5744863da2ea683#14fd610b5e25c4b1b431eda0e5744863da2ea683"
+dependencies = [
+ "serde",
+ "serde_json",
+ "thiserror 2.0.18",
 ]
 
 [[package]]

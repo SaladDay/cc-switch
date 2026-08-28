@@ -166,15 +166,20 @@ fn apply_kimi_for_coding_context_defaults(settings: &mut Value, provider: &Provi
 }
 
 pub(crate) fn sanitize_claude_settings_for_live(settings: &Value) -> Value {
-    let mut v = settings.clone();
-    if let Some(obj) = v.as_object_mut() {
-        // Internal-only fields - never write to Claude Code settings.json
-        obj.remove("api_format");
-        obj.remove("apiFormat");
-        obj.remove("openrouter_compat_mode");
-        obj.remove("openrouterCompatMode");
-    }
-    v
+    cc_switch_core::claude::prepare_live_settings(settings)
+}
+
+fn prepare_codex_live_snapshot(
+    settings: &Value,
+) -> Result<cc_switch_core::codex::PreparedLiveSnapshot, AppError> {
+    cc_switch_core::codex::prepare_live_snapshot(settings).map_err(|error| match error {
+        cc_switch_core::codex::PrepareLiveSnapshotError::SettingsNotObject => {
+            AppError::Config("Codex 供应商配置必须是 JSON 对象".to_string())
+        }
+        cc_switch_core::codex::PrepareLiveSnapshotError::MissingAuth => {
+            AppError::Config("Codex 供应商配置缺少 'auth' 字段".to_string())
+        }
+    })
 }
 
 pub(crate) fn provider_exists_in_live_config(
@@ -730,15 +735,12 @@ pub(crate) fn preflight_codex_live_write_for_state(
         provider,
         &state.codex_oauth_manager,
     )?;
-    let obj = effective
-        .settings_config
-        .as_object()
-        .ok_or_else(|| AppError::Config("Codex 供应商配置必须是 JSON 对象".to_string()))?;
-    let auth = obj
-        .get("auth")
-        .ok_or_else(|| AppError::Config("Codex 供应商配置缺少 'auth' 字段".to_string()))?;
-    let config_str = obj.get("config").and_then(|v| v.as_str());
-    crate::codex_config::preflight_codex_live_write(effective.category.as_deref(), auth, config_str)
+    let snapshot = prepare_codex_live_snapshot(&effective.settings_config)?;
+    crate::codex_config::preflight_codex_live_write(
+        effective.category.as_deref(),
+        &snapshot.auth,
+        snapshot.config.as_deref(),
+    )
 }
 
 pub(crate) fn write_live_with_common_config_for_codex_oauth_manager(
@@ -1263,14 +1265,7 @@ pub(crate) fn write_live_snapshot(app_type: &AppType, provider: &Provider) -> Re
             ));
         }
         AppType::Codex => {
-            let obj = provider
-                .settings_config
-                .as_object()
-                .ok_or_else(|| AppError::Config("Codex 供应商配置必须是 JSON 对象".to_string()))?;
-            let auth = obj
-                .get("auth")
-                .ok_or_else(|| AppError::Config("Codex 供应商配置缺少 'auth' 字段".to_string()))?;
-            let config_str = obj.get("config").and_then(|v| v.as_str());
+            let snapshot = prepare_codex_live_snapshot(&provider.settings_config)?;
 
             // Native (direct) Responses and Anthropic providers must suppress Codex's
             // freeform apply_patch custom tool via the generated catalog; chat/proxy
@@ -1281,8 +1276,8 @@ pub(crate) fn write_live_snapshot(app_type: &AppType, provider: &Provider) -> Re
             crate::codex_config::write_codex_provider_live_with_catalog(
                 &provider.settings_config,
                 provider.category.as_deref(),
-                auth,
-                config_str,
+                &snapshot.auth,
+                snapshot.config.as_deref(),
                 profile,
             )?;
             if let Some(account_id) = provider
@@ -1290,7 +1285,10 @@ pub(crate) fn write_live_snapshot(app_type: &AppType, provider: &Provider) -> Re
                 .as_ref()
                 .and_then(|meta| meta.managed_account_id_for("codex_oauth"))
             {
-                crate::codex_config::record_codex_managed_oauth_live_auth(auth, &account_id)?;
+                crate::codex_config::record_codex_managed_oauth_live_auth(
+                    &snapshot.auth,
+                    &account_id,
+                )?;
             }
         }
         AppType::Gemini => {

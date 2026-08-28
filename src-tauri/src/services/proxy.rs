@@ -2,6 +2,8 @@
 //!
 //! 提供代理服务器的启动、停止和配置管理
 
+use cc_switch_core::{builtin_app_registry, AppCapability};
+
 use crate::app_config::AppType;
 use crate::config::{get_claude_settings_path, read_json_file, write_json_file};
 use crate::database::Database;
@@ -1763,7 +1765,11 @@ impl ProxyService {
             .map_err(|e| format!("清除接管状态失败: {e}"))?;
 
         // 4. 清除所有应用的 enabled 状态（用户手动关闭，不需要下次自动恢复）
-        for app_type in ["claude", "codex", "gemini", "grokbuild"] {
+        for descriptor in builtin_app_registry()
+            .descriptors()
+            .filter(|descriptor| descriptor.supports(AppCapability::LocalProxy))
+        {
+            let app_type = descriptor.id();
             if let Ok(mut config) = self.db.get_proxy_config_for_app(app_type).await {
                 if config.enabled {
                     config.enabled = false;

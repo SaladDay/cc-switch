@@ -40,6 +40,7 @@ mod usage_events;
 mod usage_script;
 
 pub use app_config::{AppType, InstalledSkill, McpApps, McpServer, MultiAppConfig, SkillApps};
+use cc_switch_core::{builtin_app_registry, AppCapability};
 pub use codex_config::{
     extract_codex_experimental_bearer_token, get_codex_auth_path, get_codex_config_path,
     read_codex_live_settings, write_codex_live_atomic,
@@ -1936,11 +1937,13 @@ pub(crate) fn remove_tray_icon_before_exit(app_handle: &tauri::AppHandle) {
 ///
 /// 检查 `proxy_config.enabled` 字段，如果有任一应用的状态为 `true`，
 /// 则自动启动代理服务并接管对应应用的 Live 配置。
-const PROXY_STARTUP_APP_TYPES: [&str; 4] = ["claude", "codex", "gemini", "grokbuild"];
-
 async fn enabled_proxy_apps_on_startup(db: &database::Database) -> Vec<&'static str> {
     let mut apps = Vec::new();
-    for app_type in PROXY_STARTUP_APP_TYPES {
+    for descriptor in builtin_app_registry()
+        .descriptors()
+        .filter(|descriptor| descriptor.supports(AppCapability::LocalProxy))
+    {
+        let app_type = descriptor.id();
         if db
             .get_proxy_config_for_app(app_type)
             .await

@@ -1,6 +1,8 @@
 use indexmap::IndexMap;
 use std::collections::HashMap;
 
+use cc_switch_core::{builtin_app_registry, AppCapability};
+
 use crate::app_config::{AppType, McpServer};
 use crate::error::AppError;
 use crate::mcp;
@@ -197,10 +199,14 @@ impl McpService {
         let servers = Self::get_all_servers(state)?;
 
         let mut failures: Vec<String> = Vec::new();
-        for app in AppType::all() {
-            if let Err(err) = Self::project_servers_to_app(state, &servers, &app) {
+        for descriptor in builtin_app_registry()
+            .descriptors()
+            .filter(|descriptor| descriptor.supports(AppCapability::Mcp))
+        {
+            let app = descriptor.app();
+            if let Err(err) = Self::project_servers_to_app(state, &servers, app) {
                 log::warn!("同步 MCP 到 {app:?} 失败: {err}");
-                failures.push(format!("{}: {err}", app.as_str()));
+                failures.push(format!("{}: {err}", descriptor.id()));
             }
         }
 
@@ -227,10 +233,10 @@ impl McpService {
         servers: &IndexMap<String, McpServer>,
         app: &AppType,
     ) -> Result<(), AppError> {
-        if matches!(
-            app,
-            AppType::OpenClaw | AppType::ClaudeDesktop | AppType::Pi
-        ) {
+        if !builtin_app_registry()
+            .for_app(app)
+            .supports(AppCapability::Mcp)
+        {
             return Ok(());
         }
 

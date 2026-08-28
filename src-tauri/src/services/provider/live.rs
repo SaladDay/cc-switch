@@ -169,6 +169,9 @@ pub(crate) fn sanitize_claude_settings_for_live(settings: &Value) -> Value {
     cc_switch_core::claude::prepare_live_settings(settings)
 }
 
+// The full writer retains its downstream TOML/auth validation and localized
+// errors; adopting the strict projection requires a separate behavior migration.
+#[allow(deprecated)]
 fn prepare_codex_live_snapshot(
     settings: &Value,
 ) -> Result<cc_switch_core::codex::PreparedLiveSnapshot, AppError> {

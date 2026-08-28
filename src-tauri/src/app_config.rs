@@ -55,26 +55,9 @@ impl McpApps {
 
     /// 获取所有启用的应用列表
     pub fn enabled_apps(&self) -> Vec<AppType> {
-        let mut apps = Vec::new();
-        if self.claude {
-            apps.push(AppType::Claude);
-        }
-        if self.codex {
-            apps.push(AppType::Codex);
-        }
-        if self.gemini {
-            apps.push(AppType::Gemini);
-        }
-        if self.grokbuild {
-            apps.push(AppType::GrokBuild);
-        }
-        if self.opencode {
-            apps.push(AppType::OpenCode);
-        }
-        if self.hermes {
-            apps.push(AppType::Hermes);
-        }
-        apps
+        AppType::all()
+            .filter(|app| self.is_enabled_for(app))
+            .collect()
     }
 
     /// 检查是否所有应用都未启用
@@ -140,29 +123,9 @@ impl SkillApps {
 
     /// 获取所有启用的应用列表
     pub fn enabled_apps(&self) -> Vec<AppType> {
-        let mut apps = Vec::new();
-        if self.claude {
-            apps.push(AppType::Claude);
-        }
-        if self.codex {
-            apps.push(AppType::Codex);
-        }
-        if self.gemini {
-            apps.push(AppType::Gemini);
-        }
-        if self.grokbuild {
-            apps.push(AppType::GrokBuild);
-        }
-        if self.opencode {
-            apps.push(AppType::OpenCode);
-        }
-        if self.hermes {
-            apps.push(AppType::Hermes);
-        }
-        if self.pi {
-            apps.push(AppType::Pi);
-        }
-        apps
+        AppType::all()
+            .filter(|app| self.is_enabled_for(app))
+            .collect()
     }
 
     /// 检查是否所有应用都未启用

@@ -202,6 +202,55 @@ enum RefreshTokenAdoptionOutcome {
     NotManaged,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum CodexLiveAuthSwitchGuard {
+    ExistingAccount(Option<String>),
+    MissingAccount,
+}
+
+impl CodexLiveAuthSwitchGuard {
+    pub(crate) fn requires_guarded_commit(&self) -> bool {
+        matches!(self, Self::MissingAccount | Self::ExistingAccount(None))
+    }
+
+    pub(crate) fn account_missing(&self) -> bool {
+        matches!(self, Self::MissingAccount)
+    }
+
+    pub(crate) fn expected_refresh_token(&self) -> Option<&str> {
+        match self {
+            Self::ExistingAccount(token) => token.as_deref(),
+            Self::MissingAccount => None,
+        }
+    }
+
+    pub(crate) fn ensure_unchanged(&self, account_id: &str) -> Result<(), crate::error::AppError> {
+        match self {
+            Self::ExistingAccount(Some(expected)) => {
+                crate::codex_config::ensure_codex_live_auth_unchanged_for_managed_account(
+                    account_id, expected,
+                )
+            }
+            Self::ExistingAccount(None) | Self::MissingAccount => Ok(()),
+        }
+    }
+
+    pub(crate) fn clear_outgoing_if_unchanged(
+        &self,
+        account_id: &str,
+    ) -> Result<(), crate::error::AppError> {
+        match self {
+            Self::ExistingAccount(expected) => {
+                crate::codex_config::clear_codex_live_auth_for_managed_account_if_unchanged(
+                    account_id,
+                    expected.as_deref(),
+                )
+            }
+            Self::MissingAccount => Ok(()),
+        }
+    }
+}
+
 impl RefreshTokenAdoptionOutcome {
     fn state_changed(self) -> bool {
         matches!(
@@ -233,7 +282,7 @@ struct AccountLoginContext<'a> {
 }
 
 /// 持久化的账号数据
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 struct CodexAccountData {
     /// 本地稳定账号 ID（同时作为 HashMap 的 key）
     pub account_id: String,
@@ -1144,21 +1193,26 @@ impl CodexOAuthManager {
     pub(crate) async fn prepare_live_auth_for_account_switch_away(
         &self,
         account_id: &str,
-    ) -> Result<Option<String>, CodexOAuthError> {
+    ) -> Result<CodexLiveAuthSwitchGuard, CodexOAuthError> {
         let _lifecycle = self.lifecycle_lock.read().await;
         let refresh_lock = self.get_refresh_lock(account_id).await;
         let _guard = refresh_lock.lock().await;
-        {
+        let account_exists = {
             let accounts = self.accounts.read().await;
-            accounts
-                .get(account_id)
-                .ok_or_else(|| CodexOAuthError::AccountNotFound(account_id.to_string()))?;
+            accounts.contains_key(account_id)
+        };
+        if !account_exists {
+            self.ensure_account_absent_from_store(account_id).await?;
+            log::warn!(
+                "[CodexOAuth] outgoing account {account_id} is missing; continuing with a guarded live-auth commit"
+            );
+            return Ok(CodexLiveAuthSwitchGuard::MissingAccount);
         }
         let Some((live_refresh, live_id_token, live_last_refresh_ms)) = self
             .read_managed_live_auth_refresh_for_account(account_id)
             .await?
         else {
-            return Ok(None);
+            return Ok(CodexLiveAuthSwitchGuard::ExistingAccount(None));
         };
 
         let outcome = self
@@ -1174,7 +1228,9 @@ impl CodexOAuthManager {
         match outcome {
             RefreshTokenAdoptionOutcome::Synchronized { .. }
             | RefreshTokenAdoptionOutcome::Adopted
-            | RefreshTokenAdoptionOutcome::ProvablyOlder => Ok(Some(live_refresh)),
+            | RefreshTokenAdoptionOutcome::ProvablyOlder => Ok(
+                CodexLiveAuthSwitchGuard::ExistingAccount(Some(live_refresh)),
+            ),
             RefreshTokenAdoptionOutcome::Ambiguous => {
                 Err(Self::ambiguous_live_refresh_error(account_id))
             }
@@ -1817,6 +1873,56 @@ impl CodexOAuthManager {
         )
     }
 
+    async fn ensure_account_absent_from_store(
+        &self,
+        account_id: &str,
+    ) -> Result<(), CodexOAuthError> {
+        let _persist = self.storage_lock.lock().await;
+        if !self.storage_path.try_exists()? {
+            if self.accounts.read().await.is_empty() {
+                return Ok(());
+            }
+            return Err(CodexOAuthError::TokenFetchFailed(format!(
+                "账号 {account_id} 的内存与磁盘存储不一致；请重启应用后重试"
+            )));
+        }
+
+        let content = fs::read_to_string(&self.storage_path)?;
+        let raw_store: serde_json::Value = serde_json::from_str(&content)
+            .map_err(|error| CodexOAuthError::ParseError(error.to_string()))?;
+        if !raw_store
+            .as_object()
+            .is_some_and(|object| object.contains_key("accounts"))
+        {
+            return Err(CodexOAuthError::ParseError(
+                "Codex 账号存储缺少 accounts 字段".to_string(),
+            ));
+        }
+        let store: CodexOAuthStore = serde_json::from_value(raw_store)
+            .map_err(|error| CodexOAuthError::ParseError(error.to_string()))?;
+        if !matches!(store.version, 1 | 2) {
+            return Err(CodexOAuthError::ParseError(format!(
+                "不支持的 Codex 账号存储版本: {}",
+                store.version
+            )));
+        }
+        if store
+            .accounts
+            .iter()
+            .any(|(key, account)| key.trim().is_empty() || key != &account.account_id)
+        {
+            return Err(CodexOAuthError::ParseError(
+                "Codex 账号存储中的账号 ID 与索引不一致".to_string(),
+            ));
+        }
+        if store.accounts != *self.accounts.read().await {
+            return Err(CodexOAuthError::TokenFetchFailed(format!(
+                "账号 {account_id} 的内存与磁盘存储不一致；请重启应用后重试"
+            )));
+        }
+        Ok(())
+    }
+
     fn write_store_atomic(&self, content: &str) -> Result<(), CodexOAuthError> {
         if let Some(parent) = self.storage_path.parent() {
             fs::create_dir_all(parent)?;
@@ -2016,6 +2122,90 @@ fn extract_account_metadata_from_tokens(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn missing_account_requires_a_readable_store() {
+        let temp = tempfile::tempdir().unwrap();
+        std::fs::write(temp.path().join("codex_oauth_auth.json"), "{invalid").unwrap();
+        let manager = CodexOAuthManager::new(temp.path().to_path_buf());
+
+        assert!(matches!(
+            manager
+                .prepare_live_auth_for_account_switch_away("missing-account")
+                .await,
+            Err(CodexOAuthError::ParseError(_))
+        ));
+    }
+
+    #[tokio::test]
+    async fn memory_disk_divergence_does_not_look_like_a_deleted_account() {
+        let temp = tempfile::tempdir().unwrap();
+        let manager = CodexOAuthManager::new(temp.path().to_path_buf());
+        manager
+            .add_test_account_with_user_identity("account-a", "access", "user-a")
+            .await
+            .unwrap();
+        manager.accounts.write().await.clear();
+
+        assert!(matches!(
+            manager
+                .prepare_live_auth_for_account_switch_away("account-a")
+                .await,
+            Err(CodexOAuthError::TokenFetchFailed(message))
+                if message.contains("内存与磁盘存储不一致")
+        ));
+    }
+
+    #[tokio::test]
+    async fn missing_store_is_not_safe_when_memory_has_accounts() {
+        let temp = tempfile::tempdir().unwrap();
+        let manager = CodexOAuthManager::new(temp.path().to_path_buf());
+        manager
+            .add_test_account_with_user_identity("account-b", "access", "user-b")
+            .await
+            .unwrap();
+        std::fs::remove_file(temp.path().join("codex_oauth_auth.json")).unwrap();
+
+        assert!(matches!(
+            manager
+                .prepare_live_auth_for_account_switch_away("missing-account")
+                .await,
+            Err(CodexOAuthError::TokenFetchFailed(message))
+                if message.contains("内存与磁盘存储不一致")
+        ));
+    }
+
+    #[tokio::test]
+    async fn structurally_invalid_store_does_not_look_like_a_deleted_account() {
+        for store in [
+            serde_json::json!({ "version": 2 }),
+            serde_json::json!({
+                "version": 2,
+                "accounts": {
+                    "wrong-key": {
+                        "account_id": "account-a",
+                        "refresh_token": "refresh",
+                        "authenticated_at": 1
+                    }
+                }
+            }),
+        ] {
+            let temp = tempfile::tempdir().unwrap();
+            std::fs::write(
+                temp.path().join("codex_oauth_auth.json"),
+                serde_json::to_vec(&store).unwrap(),
+            )
+            .unwrap();
+            let manager = CodexOAuthManager::new(temp.path().to_path_buf());
+
+            assert!(matches!(
+                manager
+                    .prepare_live_auth_for_account_switch_away("account-a")
+                    .await,
+                Err(CodexOAuthError::ParseError(_))
+            ));
+        }
+    }
 
     #[test]
     fn test_parse_interval_number() {

@@ -14,7 +14,7 @@ use crate::config::{delete_file, get_claude_settings_path, read_json_file, write
 use crate::database::Database;
 use crate::error::AppError;
 use crate::provider::Provider;
-use crate::proxy::providers::codex_oauth_auth::CodexOAuthManager;
+use crate::proxy::providers::codex_oauth_auth::{CodexLiveAuthSwitchGuard, CodexOAuthManager};
 use crate::services::mcp::McpService;
 use crate::store::AppState;
 
@@ -714,6 +714,19 @@ pub(crate) fn write_live_with_common_config_for_state(
     )
 }
 
+pub(crate) fn prepare_live_with_common_config_if_codex_auth_absent(
+    state: &AppState,
+    provider: &Provider,
+) -> Result<crate::codex_config::CodexAbsentAuthCommit, AppError> {
+    let effective_provider = build_effective_provider_for_live_with_codex_oauth_manager(
+        state.db.as_ref(),
+        &AppType::Codex,
+        provider,
+        &state.codex_oauth_manager,
+    )?;
+    prepare_live_snapshot_if_codex_auth_absent(&effective_provider)
+}
+
 /// Validate the target provider's Codex live projection without writing:
 /// build the effective settings exactly like the live write would, then run
 /// the write-layer plan (legacy normalization, safety gates, token
@@ -907,7 +920,7 @@ fn get_codex_managed_oauth_live_auth_value(
 pub(crate) fn prepare_codex_managed_oauth_live_auth_switch_away(
     manager: Arc<CodexOAuthManager>,
     account_id: String,
-) -> Result<Option<String>, AppError> {
+) -> Result<CodexLiveAuthSwitchGuard, AppError> {
     std::thread::spawn(move || {
         tauri::async_runtime::block_on(async move {
             manager
@@ -1701,6 +1714,35 @@ pub fn sync_current_to_live(state: &AppState) -> Result<(), AppError> {
             failures.join("; ")
         )))
     }
+}
+
+pub(crate) fn prepare_live_snapshot_if_codex_auth_absent(
+    provider: &Provider,
+) -> Result<crate::codex_config::CodexAbsentAuthCommit, AppError> {
+    let obj = provider
+        .settings_config
+        .as_object()
+        .ok_or_else(|| AppError::Config("Codex 供应商配置必须是 JSON 对象".to_string()))?;
+    let auth = obj
+        .get("auth")
+        .ok_or_else(|| AppError::Config("Codex 供应商配置缺少 'auth' 字段".to_string()))?;
+    let config_str = obj.get("config").and_then(|value| value.as_str());
+    let profile = crate::proxy::providers::resolve_codex_catalog_tool_profile(provider);
+
+    if let Some(account_id) = provider
+        .meta
+        .as_ref()
+        .and_then(|meta| meta.managed_account_id_for("codex_oauth"))
+    {
+        crate::codex_config::record_codex_managed_oauth_live_auth(auth, &account_id)?;
+    }
+    crate::codex_config::prepare_codex_provider_live_with_catalog_if_auth_absent(
+        &provider.settings_config,
+        provider.category.as_deref(),
+        auth,
+        config_str,
+        profile,
+    )
 }
 
 /// Read current live settings for an app type

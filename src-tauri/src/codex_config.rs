@@ -12,6 +12,7 @@ use once_cell::sync::OnceCell;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::fs;
+use std::io::Write;
 use std::process::{Command, Stdio};
 use toml_edit::DocumentMut;
 
@@ -289,6 +290,31 @@ impl CodexLiveStateSnapshot {
                 if let Err(error) = state.restore() {
                     failures.push(format!("{label}: {error}"));
                 }
+            }
+        }
+
+        if failures.is_empty() {
+            Ok(())
+        } else {
+            Err(AppError::Message(format!(
+                "恢复 Codex Live 状态失败: {}",
+                failures.join("; ")
+            )))
+        }
+    }
+
+    /// Roll back cc-switch-owned files without touching the current auth.json.
+    /// The marker belongs to this failed provider write; Codex CLI never writes
+    /// it, so restoring the snapshot cannot clobber a concurrent native login.
+    pub(crate) fn restore_preserving_current_auth(&self) -> Result<(), AppError> {
+        let mut failures = Vec::new();
+        for (label, state) in [
+            ("catalog", &self.catalog),
+            ("config", &self.config),
+            ("managed marker", &self.managed_marker),
+        ] {
+            if let Err(error) = state.restore() {
+                failures.push(format!("{label}: {error}"));
             }
         }
 
@@ -737,6 +763,20 @@ pub fn clear_codex_live_auth_for_managed_account(account_id: &str) -> Result<(),
     clear_codex_live_auth_for_managed_account_if_unchanged(account_id, None)
 }
 
+pub(crate) fn ensure_codex_live_auth_absent() -> Result<(), AppError> {
+    let auth_path = get_codex_auth_path();
+    if auth_path.try_exists().map_err(|source| AppError::Io {
+        path: auth_path.display().to_string(),
+        source,
+    })? {
+        return Err(AppError::Conflict(
+            "Codex CLI 登录凭据在切换期间出现；为避免覆盖有效凭据，本次操作已取消，请重试"
+                .to_string(),
+        ));
+    }
+    Ok(())
+}
+
 /// Verify that the outgoing account's live refresh generation has not changed
 /// since it was adopted into the OAuth manager.
 pub fn ensure_codex_live_auth_unchanged_for_managed_account(
@@ -1020,6 +1060,76 @@ pub fn write_codex_live_atomic(
     }
 
     Ok(())
+}
+
+/// Final step of a guarded live-auth write. All other state is committed
+/// before this value is consumed, so a successful auth publication cannot be
+/// followed by a fallible operation that would need to delete it again.
+pub(crate) enum CodexAbsentAuthCommit {
+    Publish {
+        temporary: tempfile::NamedTempFile,
+        auth_path: PathBuf,
+    },
+    VerifyAbsent,
+    Preserve,
+}
+
+impl CodexAbsentAuthCommit {
+    pub(crate) fn commit(self) -> Result<(), AppError> {
+        match self {
+            Self::Publish {
+                temporary,
+                auth_path,
+            } => temporary.persist_noclobber(&auth_path).map(|_| ()).map_err(|error| {
+                if error.error.kind() == std::io::ErrorKind::AlreadyExists
+                    || auth_path.try_exists().unwrap_or(false)
+                {
+                    AppError::Conflict(
+                        "Codex CLI 登录凭据在切换期间出现；为避免覆盖有效凭据，本次操作已取消，请重试"
+                            .to_string(),
+                    )
+                } else {
+                    AppError::io(&auth_path, error.error)
+                }
+            }),
+            Self::VerifyAbsent => ensure_codex_live_auth_absent(),
+            Self::Preserve => Ok(()),
+        }
+    }
+}
+
+/// Stage config and a managed auth bundle without replacing a concurrent login.
+fn prepare_codex_live_if_auth_absent(
+    auth: &Value,
+    config_text_opt: Option<&str>,
+) -> Result<CodexAbsentAuthCommit, AppError> {
+    let auth_path = get_codex_auth_path();
+    let config_path = get_codex_config_path();
+    let config_text = config_text_opt.unwrap_or_default();
+    if !config_text.trim().is_empty() {
+        toml::from_str::<toml::Table>(config_text)
+            .map_err(|error| AppError::toml(&config_path, error))?;
+    }
+
+    let parent = auth_path
+        .parent()
+        .ok_or_else(|| AppError::Config("无效的 Codex auth 路径".to_string()))?;
+    fs::create_dir_all(parent).map_err(|error| AppError::io(parent, error))?;
+    let json =
+        serde_json::to_vec_pretty(auth).map_err(|source| AppError::JsonSerialize { source })?;
+    let mut temporary =
+        tempfile::NamedTempFile::new_in(parent).map_err(|error| AppError::io(parent, error))?;
+
+    temporary
+        .write_all(&json)
+        .and_then(|_| temporary.flush())
+        .map_err(|error| AppError::io(temporary.path(), error))?;
+
+    write_text_file(&config_path, config_text)?;
+    Ok(CodexAbsentAuthCommit::Publish {
+        temporary,
+        auth_path,
+    })
 }
 
 /// 读取 `~/.codex/config.toml`，若不存在返回空字符串
@@ -2514,6 +2624,20 @@ pub fn write_codex_provider_live_with_catalog(
     write_codex_live_for_provider(category, auth, prepared_config.as_deref())
 }
 
+pub(crate) fn prepare_codex_provider_live_with_catalog_if_auth_absent(
+    settings: &Value,
+    category: Option<&str>,
+    auth: &Value,
+    config_text: Option<&str>,
+    profile: CodexCatalogToolProfile,
+) -> Result<CodexAbsentAuthCommit, AppError> {
+    let prepared_config = config_text
+        .map(|text| prepare_codex_config_text_with_model_catalog(settings, text, profile))
+        .transpose()?;
+
+    prepare_codex_live_for_provider_if_auth_absent(category, auth, prepared_config.as_deref())
+}
+
 /// Extract a provider-scoped `experimental_bearer_token` from Codex `config.toml`.
 ///
 /// Mobile compat: third-party providers may store the API key inside
@@ -3798,6 +3922,29 @@ pub fn write_codex_live_for_provider(
     Ok(())
 }
 
+pub(crate) fn prepare_codex_live_for_provider_if_auth_absent(
+    category: Option<&str>,
+    auth: &Value,
+    config_text: Option<&str>,
+) -> Result<CodexAbsentAuthCommit, AppError> {
+    let plan = plan_codex_live_write(
+        category,
+        auth,
+        config_text,
+        crate::settings::preserve_codex_official_auth_on_switch(),
+    )?;
+    if plan.write_full_auth {
+        return prepare_codex_live_if_auth_absent(auth, plan.config_text.as_deref());
+    }
+
+    write_codex_live_config_atomic(plan.config_text.as_deref())?;
+    if plan.remove_auth_file {
+        Ok(CodexAbsentAuthCommit::VerifyAbsent)
+    } else {
+        Ok(CodexAbsentAuthCommit::Preserve)
+    }
+}
+
 fn remove_codex_live_auth_after_third_party_switch() {
     let auth_path = get_codex_auth_path();
     if !auth_path.exists() {
@@ -4189,6 +4336,53 @@ mod tests {
             catalog_bytes,
             marker_bytes,
         }
+    }
+
+    #[test]
+    #[serial]
+    fn absent_auth_rollback_preserves_a_concurrent_login() {
+        let _home = CodexLiveTestHome::new();
+        crate::config::write_text_file(&get_codex_config_path(), "model = \"before\"\n")
+            .expect("seed config");
+        let snapshot = CodexLiveStateSnapshot::capture().expect("capture absent auth state");
+        let managed_auth = codex_managed_oauth_auth_value(
+            "managed-workspace",
+            "managed-access",
+            Some(&test_codex_id_token("managed-user")),
+            "managed-refresh",
+            "2026-09-02T00:00:00Z",
+        );
+
+        let pending = prepare_codex_live_for_provider_if_auth_absent(
+            Some("official"),
+            &managed_auth,
+            Some("model = \"after\"\n"),
+        )
+        .expect("stage guarded write");
+        let native_auth = json!({
+            "tokens": {
+                "refresh_token": "native-refresh",
+                "account_id": "native-workspace"
+            }
+        });
+        crate::config::write_json_file(&get_codex_auth_path(), &native_auth)
+            .expect("simulate concurrent login");
+        let error = pending
+            .commit()
+            .expect_err("concurrent login must cancel guarded write");
+        assert!(matches!(error, AppError::Conflict(_)));
+        snapshot
+            .restore_preserving_current_auth()
+            .expect("roll back without replacing concurrent auth");
+
+        assert_eq!(
+            crate::config::read_json_file::<Value>(&get_codex_auth_path()).unwrap(),
+            native_auth
+        );
+        assert_eq!(
+            fs::read_to_string(get_codex_config_path()).unwrap(),
+            "model = \"before\"\n"
+        );
     }
 
     fn seed_rotated_managed_codex_live_state() -> CodexLiveTestState {

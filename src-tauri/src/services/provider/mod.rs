@@ -17,6 +17,7 @@ use crate::app_config::AppType;
 use crate::database::{validate_cost_multiplier, validate_pricing_source};
 use crate::error::AppError;
 use crate::provider::{Provider, UsageResult};
+use crate::proxy::providers::codex_oauth_auth::CodexLiveAuthSwitchGuard;
 use crate::services::mcp::McpService;
 use crate::settings::CustomEndpoint;
 use crate::store::AppState;
@@ -3037,6 +3038,129 @@ wire_api = "responses"
 
     #[test]
     #[serial]
+    fn deleted_managed_account_can_be_rebound_or_switched_away_from() {
+        with_test_home(|state, _| {
+            crate::settings::reload_settings().expect("reload settings");
+            tauri::async_runtime::block_on(async {
+                for (id, user) in [("acct-old", "user-old"), ("acct-new", "user-new")] {
+                    state
+                        .codex_oauth_manager
+                        .add_test_account_with_user_identity(id, "test-access", user)
+                        .await
+                        .expect("seed managed account");
+                }
+            });
+
+            let managed = managed_codex_provider("managed-current", "acct-old");
+            let mut fallback = Provider::with_id(
+                "unbound-official".to_string(),
+                "Unbound Official".to_string(),
+                json!({ "auth": {}, "config": "" }),
+                None,
+            );
+            fallback.category = Some("official".to_string());
+            for provider in [&managed, &fallback] {
+                state
+                    .db
+                    .save_provider(AppType::Codex.as_str(), provider)
+                    .expect("save provider");
+            }
+            ProviderService::switch(state, AppType::Codex, &managed.id)
+                .expect("activate managed provider");
+
+            std::fs::remove_file(crate::codex_config::get_codex_auth_path())
+                .expect("simulate absent live auth");
+            let guard =
+                ProviderService::prepare_outgoing_managed_codex_live_auth(state, Some("acct-old"))
+                    .expect("prepare absent live auth")
+                    .expect("managed outgoing guard");
+            assert!(guard.requires_guarded_commit());
+            assert!(!guard.account_missing());
+
+            tauri::async_runtime::block_on(state.codex_oauth_manager.remove_account("acct-old"))
+                .expect("remove old account");
+            let mut rebound = managed.clone();
+            rebound
+                .meta
+                .as_mut()
+                .and_then(|meta| meta.auth_binding.as_mut())
+                .expect("managed binding")
+                .account_id = Some("acct-new".to_string());
+            ProviderService::update(state, AppType::Codex, None, rebound)
+                .expect("rebind after account deletion");
+
+            tauri::async_runtime::block_on(state.codex_oauth_manager.remove_account("acct-new"))
+                .expect("remove rebound account");
+            let native_auth = json!({
+                "tokens": {
+                    "refresh_token": "native-refresh",
+                    "account_id": "native-workspace"
+                }
+            });
+            write_json_file(&crate::codex_config::get_codex_auth_path(), &native_auth)
+                .expect("simulate native login after account deletion");
+            ProviderService::switch(state, AppType::Codex, &fallback.id)
+                .expect("switch away after account deletion");
+            assert_eq!(
+                state
+                    .db
+                    .get_current_provider(AppType::Codex.as_str())
+                    .expect("read current provider")
+                    .as_deref(),
+                Some(fallback.id.as_str())
+            );
+            assert_eq!(
+                read_json_file::<Value>(&crate::codex_config::get_codex_auth_path())
+                    .expect("read preserved native auth"),
+                native_auth
+            );
+        });
+    }
+
+    #[test]
+    #[serial]
+    fn guarded_codex_write_validates_marker_before_publishing_auth() {
+        with_test_home(|_, _| {
+            crate::settings::reload_settings().expect("reload settings");
+            let mut provider = Provider::with_id(
+                "managed-invalid-marker".to_string(),
+                "Managed invalid marker".to_string(),
+                json!({
+                    "auth": {
+                        "auth_mode": "chatgpt",
+                        "OPENAI_API_KEY": null,
+                        "tokens": {
+                            "access_token": "managed-access",
+                            "refresh_token": "managed-refresh",
+                            "account_id": "managed-workspace"
+                        },
+                        "last_refresh": "2026-09-02T00:00:00Z"
+                    },
+                    "config": "model = \"gpt-test\"\n"
+                }),
+                None,
+            );
+            provider.category = Some("official".to_string());
+            provider.meta = Some(ProviderMeta {
+                auth_binding: Some(AuthBinding {
+                    source: AuthBindingSource::ManagedAccount,
+                    auth_provider: Some("codex_oauth".to_string()),
+                    account_id: Some("managed-local".to_string()),
+                }),
+                ..Default::default()
+            });
+
+            let error = live::prepare_live_snapshot_if_codex_auth_absent(&provider)
+                .err()
+                .expect("marker validation must fail");
+            assert!(error.to_string().contains("稳定用户身份"));
+            assert!(!crate::codex_config::get_codex_auth_path().exists());
+            assert!(!crate::codex_config::get_codex_config_path().exists());
+        });
+    }
+
+    #[test]
+    #[serial]
     fn codex_auth_center_removal_waits_for_provider_switch_lock() {
         with_test_home(|state, _| {
             crate::settings::reload_settings().expect("reload settings");
@@ -4157,6 +4281,18 @@ impl ProviderService {
         }
     }
 
+    fn prepare_live_if_codex_auth_absent(
+        state: &AppState,
+        provider: &Provider,
+        preflighted_provider: Option<&Provider>,
+    ) -> Result<crate::codex_config::CodexAbsentAuthCommit, AppError> {
+        if let Some(effective_provider) = preflighted_provider {
+            live::prepare_live_snapshot_if_codex_auth_absent(effective_provider)
+        } else {
+            live::prepare_live_with_common_config_if_codex_auth_absent(state, provider)
+        }
+    }
+
     fn managed_codex_transaction_error(
         operation: &str,
         error: AppError,
@@ -4172,6 +4308,55 @@ impl ProviderService {
             }
         }
         if let Err(rollback_error) = snapshot.restore_preserving_newer_same_account_auth() {
+            rollback_failures.push(rollback_error.to_string());
+        }
+
+        if rollback_failures.is_empty() {
+            error
+        } else {
+            AppError::Message(format!(
+                "{operation}失败: {error}; 回滚同时失败: {}",
+                rollback_failures.join("; ")
+            ))
+        }
+    }
+
+    /// Roll back a guarded live-auth transaction. This is called only when the
+    /// guarded writer failed before publishing auth.json; current auth may
+    /// therefore belong to a concurrent Codex login and must stay untouched.
+    fn guarded_codex_transaction_error(
+        state: &AppState,
+        operation: &str,
+        error: AppError,
+        snapshot: &crate::codex_config::CodexLiveStateSnapshot,
+        previous_provider: Option<&Provider>,
+        restore_current: Option<(&AppType, Option<&str>, Option<&str>)>,
+    ) -> AppError {
+        let mut rollback_failures = Vec::new();
+
+        if let Some(previous_provider) = previous_provider {
+            if let Err(rollback_error) = state
+                .db
+                .save_provider(AppType::Codex.as_str(), previous_provider)
+            {
+                rollback_failures.push(format!("恢复 Provider 数据失败: {rollback_error}"));
+            }
+        }
+        if let Some((app_type, previous_local_current, previous_db_current)) = restore_current {
+            let db_restore = match previous_db_current {
+                Some(id) => state.db.set_current_provider(app_type.as_str(), id),
+                None => state.db.clear_current_provider(app_type.as_str()),
+            };
+            if let Err(rollback_error) = db_restore {
+                rollback_failures.push(format!("恢复数据库 current 失败: {rollback_error}"));
+            }
+            if let Err(rollback_error) =
+                crate::settings::set_current_provider(app_type, previous_local_current)
+            {
+                rollback_failures.push(format!("恢复本地 current 失败: {rollback_error}"));
+            }
+        }
+        if let Err(rollback_error) = snapshot.restore_preserving_current_auth() {
             rollback_failures.push(rollback_error.to_string());
         }
 
@@ -4287,7 +4472,7 @@ impl ProviderService {
     fn prepare_outgoing_managed_codex_live_auth(
         state: &AppState,
         account_id: Option<&str>,
-    ) -> Result<Option<String>, AppError> {
+    ) -> Result<Option<CodexLiveAuthSwitchGuard>, AppError> {
         let Some(account_id) = account_id else {
             return Ok(None);
         };
@@ -4295,38 +4480,27 @@ impl ProviderService {
             state.codex_oauth_manager.clone(),
             account_id.to_string(),
         )
+        .map(Some)
     }
 
     fn ensure_outgoing_managed_codex_live_auth_unchanged(
         account_id: Option<&str>,
-        expected_refresh_token: Option<&str>,
+        guard: Option<&CodexLiveAuthSwitchGuard>,
     ) -> Result<(), AppError> {
-        if let (Some(account_id), Some(expected_refresh_token)) =
-            (account_id, expected_refresh_token)
-        {
-            crate::codex_config::ensure_codex_live_auth_unchanged_for_managed_account(
-                account_id,
-                expected_refresh_token,
-            )?;
+        if let (Some(account_id), Some(guard)) = (account_id, guard) {
+            guard.ensure_unchanged(account_id)?;
         }
         Ok(())
     }
 
     fn clear_outgoing_managed_codex_live_auth(
         account_id: Option<&str>,
-        expected_refresh_token: Option<&str>,
+        guard: Option<&CodexLiveAuthSwitchGuard>,
     ) -> Result<(), AppError> {
-        let Some(account_id) = account_id else {
-            return Ok(());
-        };
-        if let Some(expected_refresh_token) = expected_refresh_token {
-            crate::codex_config::clear_codex_live_auth_for_managed_account_if_unchanged(
-                account_id,
-                Some(expected_refresh_token),
-            )
-        } else {
-            crate::codex_config::clear_codex_live_auth_for_managed_account(account_id)
+        if let (Some(account_id), Some(guard)) = (account_id, guard) {
+            guard.clear_outgoing_if_unchanged(account_id)?;
         }
+        Ok(())
     }
 
     fn normalize_provider_if_claude(app_type: &AppType, provider: &mut Provider) {
@@ -4776,7 +4950,7 @@ impl ProviderService {
                 return Ok(true);
             }
 
-            let outgoing_live_refresh_token = Self::prepare_outgoing_managed_codex_live_auth(
+            let outgoing_live_auth_guard = Self::prepare_outgoing_managed_codex_live_auth(
                 state,
                 outgoing_managed_codex_account_id.as_deref(),
             )?;
@@ -4790,6 +4964,21 @@ impl ProviderService {
             let live_taken_over = state
                 .proxy_service
                 .detect_takeover_in_live_config_for_app(&app_type);
+            if (has_live_backup || live_taken_over)
+                && outgoing_live_auth_guard
+                    .as_ref()
+                    .is_some_and(CodexLiveAuthSwitchGuard::account_missing)
+            {
+                return Err(AppError::Message(
+                    "当前托管账号已删除；请先关闭代理接管，再更新账号绑定".to_string(),
+                ));
+            }
+            let outgoing_live_refresh_token = outgoing_live_auth_guard
+                .as_ref()
+                .and_then(CodexLiveAuthSwitchGuard::expected_refresh_token);
+            let requires_guarded_auth_commit = outgoing_live_auth_guard
+                .as_ref()
+                .is_some_and(CodexLiveAuthSwitchGuard::requires_guarded_commit);
             let preflighted_provider =
                 Self::preflight_managed_codex_live(state, &app_type, &provider)?;
             // Capture after preflight: a legitimate refresh may have advanced
@@ -4797,10 +4986,64 @@ impl ProviderService {
             let snapshot = crate::codex_config::CodexLiveStateSnapshot::capture()?;
 
             if !has_live_backup && !live_taken_over {
+                if requires_guarded_auth_commit {
+                    let pending_auth = (|| {
+                        Self::ensure_outgoing_managed_codex_live_auth_unchanged(
+                            outgoing_managed_codex_account_id.as_deref(),
+                            outgoing_live_auth_guard.as_ref(),
+                        )?;
+                        Self::prepare_live_if_codex_auth_absent(
+                            state,
+                            &provider,
+                            preflighted_provider.as_ref(),
+                        )
+                    })();
+                    let pending_auth = match pending_auth {
+                        Ok(pending) => pending,
+                        Err(error) => {
+                            return Err(Self::guarded_codex_transaction_error(
+                                state,
+                                "准备 Codex Live",
+                                error,
+                                &snapshot,
+                                None,
+                                None,
+                            ));
+                        }
+                    };
+                    if let Err(error) = state.db.save_provider(app_type.as_str(), &provider) {
+                        return Err(Self::guarded_codex_transaction_error(
+                            state,
+                            "更新托管 Codex provider",
+                            error,
+                            &snapshot,
+                            None,
+                            None,
+                        ));
+                    }
+                    if let Err(error) = pending_auth.commit() {
+                        return Err(Self::guarded_codex_transaction_error(
+                            state,
+                            "发布 Codex 认证",
+                            error,
+                            &snapshot,
+                            existing_provider.as_ref(),
+                            None,
+                        ));
+                    }
+
+                    if let Err(err) = McpService::sync_enabled_for_app(state, &app_type) {
+                        log::warn!(
+                            "保存供应商后重投影 {app_type:?} MCP 失败（将在下次同步时自愈）: {err}"
+                        );
+                    }
+                    return Ok(true);
+                }
+
                 let commit_result = (|| {
                     Self::ensure_outgoing_managed_codex_live_auth_unchanged(
                         outgoing_managed_codex_account_id.as_deref(),
-                        outgoing_live_refresh_token.as_deref(),
+                        outgoing_live_auth_guard.as_ref(),
                     )?;
                     Self::write_preflighted_or_current_live(
                         state,
@@ -4810,7 +5053,7 @@ impl ProviderService {
                     )?;
                     Self::clear_outgoing_managed_codex_live_auth(
                         outgoing_managed_codex_account_id.as_deref(),
-                        outgoing_live_refresh_token.as_deref(),
+                        outgoing_live_auth_guard.as_ref(),
                     )?;
                     state.db.save_provider(app_type.as_str(), &provider)?;
                     Ok::<(), AppError>(())
@@ -4835,7 +5078,7 @@ impl ProviderService {
             let commit_result = (|| {
                 Self::ensure_outgoing_managed_codex_live_auth_unchanged(
                     outgoing_managed_codex_account_id.as_deref(),
-                    outgoing_live_refresh_token.as_deref(),
+                    outgoing_live_auth_guard.as_ref(),
                 )?;
                 futures::executor::block_on(
                     state.proxy_service.update_live_backup_from_provider_inner(
@@ -4853,7 +5096,7 @@ impl ProviderService {
                             .sync_codex_live_from_provider_while_proxy_active_guarded(
                                 &provider,
                                 outgoing_managed_codex_account_id.as_deref(),
-                                outgoing_live_refresh_token.as_deref(),
+                                outgoing_live_refresh_token,
                             ),
                     )
                     .map_err(|error| {
@@ -4865,7 +5108,7 @@ impl ProviderService {
                     // with the edited current provider as well as the backup.
                     Self::ensure_outgoing_managed_codex_live_auth_unchanged(
                         outgoing_managed_codex_account_id.as_deref(),
-                        outgoing_live_refresh_token.as_deref(),
+                        outgoing_live_auth_guard.as_ref(),
                     )?;
                     Self::write_preflighted_or_current_live(
                         state,
@@ -4877,7 +5120,7 @@ impl ProviderService {
 
                 Self::clear_outgoing_managed_codex_live_auth(
                     outgoing_managed_codex_account_id.as_deref(),
-                    outgoing_live_refresh_token.as_deref(),
+                    outgoing_live_auth_guard.as_ref(),
                 )?;
 
                 // DB is the final commit. Every fallible side effect above can be
@@ -5256,10 +5499,13 @@ impl ProviderService {
             .as_ref()
             .filter(|account_id| target_managed_codex_account_id.as_ref() != Some(*account_id))
             .cloned();
-        let outgoing_live_refresh_token = Self::prepare_outgoing_managed_codex_live_auth(
+        let outgoing_live_auth_guard = Self::prepare_outgoing_managed_codex_live_auth(
             state,
             outgoing_managed_codex_account_id.as_deref(),
         )?;
+        let requires_guarded_auth_commit = outgoing_live_auth_guard
+            .as_ref()
+            .is_some_and(CodexLiveAuthSwitchGuard::requires_guarded_commit);
 
         // 提交 current 前预检托管 Codex token（见 preflight_managed_codex_live）。
         let preflighted_provider = Self::preflight_managed_codex_live(state, &app_type, provider)?;
@@ -5268,53 +5514,118 @@ impl ProviderService {
                 || target_managed_codex_account_id.is_some());
 
         if use_managed_codex_transaction {
-            // auth/config/catalog/marker form one logical live commit. Write them
-            // before current, then restore the exact four-file snapshot on any
-            // failure so native logins and CLI-rotated tokens are not reconstructed
-            // from a stale provider row.
+            // auth/config/catalog/marker form one logical live commit.
             let snapshot = crate::codex_config::CodexLiveStateSnapshot::capture()?;
-            let live_result = (|| {
-                Self::ensure_outgoing_managed_codex_live_auth_unchanged(
-                    outgoing_managed_codex_account_id.as_deref(),
-                    outgoing_live_refresh_token.as_deref(),
-                )?;
-                Self::write_preflighted_or_current_live(
-                    state,
-                    &app_type,
-                    provider,
-                    preflighted_provider.as_ref(),
-                )?;
-                Self::clear_outgoing_managed_codex_live_auth(
-                    outgoing_managed_codex_account_id.as_deref(),
-                    outgoing_live_refresh_token.as_deref(),
-                )?;
-                Ok::<(), AppError>(())
-            })();
-            if let Err(error) = live_result {
-                return Err(Self::managed_codex_transaction_error(
-                    "写入 Codex Live",
-                    error,
-                    &snapshot,
-                    None,
-                ));
-            }
 
-            let previous_local_current = crate::settings::get_current_provider(&app_type);
-            if let Err(error) = crate::settings::set_current_provider(&app_type, Some(id)) {
-                return Err(Self::managed_codex_transaction_error(
-                    "更新本地 current",
-                    error,
-                    &snapshot,
-                    Some((&app_type, previous_local_current.as_deref())),
-                ));
-            }
-            if let Err(error) = state.db.set_current_provider(app_type.as_str(), id) {
-                return Err(Self::managed_codex_transaction_error(
-                    "更新数据库 current",
-                    error,
-                    &snapshot,
-                    Some((&app_type, previous_local_current.as_deref())),
-                ));
+            if requires_guarded_auth_commit {
+                let previous_local_current = crate::settings::get_current_provider(&app_type);
+                let previous_db_current = state.db.get_current_provider(app_type.as_str())?;
+                let pending_auth = (|| {
+                    Self::ensure_outgoing_managed_codex_live_auth_unchanged(
+                        outgoing_managed_codex_account_id.as_deref(),
+                        outgoing_live_auth_guard.as_ref(),
+                    )?;
+                    Self::prepare_live_if_codex_auth_absent(
+                        state,
+                        provider,
+                        preflighted_provider.as_ref(),
+                    )
+                })();
+                let pending_auth = match pending_auth {
+                    Ok(pending) => pending,
+                    Err(error) => {
+                        return Err(Self::guarded_codex_transaction_error(
+                            state,
+                            "准备 Codex Live",
+                            error,
+                            &snapshot,
+                            None,
+                            None,
+                        ));
+                    }
+                };
+                if let Err(error) = state.db.set_current_provider(app_type.as_str(), id) {
+                    return Err(Self::guarded_codex_transaction_error(
+                        state,
+                        "更新数据库 current",
+                        error,
+                        &snapshot,
+                        None,
+                        None,
+                    ));
+                }
+                if let Err(error) = crate::settings::set_current_provider(&app_type, Some(id)) {
+                    return Err(Self::guarded_codex_transaction_error(
+                        state,
+                        "更新本地 current",
+                        error,
+                        &snapshot,
+                        None,
+                        Some((
+                            &app_type,
+                            previous_local_current.as_deref(),
+                            previous_db_current.as_deref(),
+                        )),
+                    ));
+                }
+                if let Err(error) = pending_auth.commit() {
+                    return Err(Self::guarded_codex_transaction_error(
+                        state,
+                        "发布 Codex 认证",
+                        error,
+                        &snapshot,
+                        None,
+                        Some((
+                            &app_type,
+                            previous_local_current.as_deref(),
+                            previous_db_current.as_deref(),
+                        )),
+                    ));
+                }
+            } else {
+                let live_result = (|| {
+                    Self::ensure_outgoing_managed_codex_live_auth_unchanged(
+                        outgoing_managed_codex_account_id.as_deref(),
+                        outgoing_live_auth_guard.as_ref(),
+                    )?;
+                    Self::write_preflighted_or_current_live(
+                        state,
+                        &app_type,
+                        provider,
+                        preflighted_provider.as_ref(),
+                    )?;
+                    Self::clear_outgoing_managed_codex_live_auth(
+                        outgoing_managed_codex_account_id.as_deref(),
+                        outgoing_live_auth_guard.as_ref(),
+                    )?;
+                    Ok::<(), AppError>(())
+                })();
+                if let Err(error) = live_result {
+                    return Err(Self::managed_codex_transaction_error(
+                        "写入 Codex Live",
+                        error,
+                        &snapshot,
+                        None,
+                    ));
+                }
+
+                let previous_local_current = crate::settings::get_current_provider(&app_type);
+                if let Err(error) = crate::settings::set_current_provider(&app_type, Some(id)) {
+                    return Err(Self::managed_codex_transaction_error(
+                        "更新本地 current",
+                        error,
+                        &snapshot,
+                        Some((&app_type, previous_local_current.as_deref())),
+                    ));
+                }
+                if let Err(error) = state.db.set_current_provider(app_type.as_str(), id) {
+                    return Err(Self::managed_codex_transaction_error(
+                        "更新数据库 current",
+                        error,
+                        &snapshot,
+                        Some((&app_type, previous_local_current.as_deref())),
+                    ));
+                }
             }
         } else {
             // Codex: validate the live projection before committing current —
@@ -5349,6 +5660,7 @@ impl ProviderService {
         // a log entry: config.toml and is_current are already committed, so
         // failing the switch here would report a switch that in fact happened.
         if matches!(app_type, AppType::Codex)
+            && !requires_guarded_auth_commit
             && backfill_completed
             && (provider.category.as_deref() == Some("official")
                 || crate::proxy::providers::is_codex_official_provider(provider))

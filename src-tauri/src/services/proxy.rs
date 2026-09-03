@@ -3019,11 +3019,19 @@ impl ProxyService {
         let outgoing_live_refresh_token =
             if should_sync_backup && matches!(app_type_enum, AppType::Codex) {
                 match outgoing_managed_codex_account_id.as_deref() {
-                    Some(account_id) => self
-                        .codex_oauth_manager
-                        .prepare_live_auth_for_account_switch_away(account_id)
-                        .await
-                        .map_err(|error| error.to_string())?,
+                    Some(account_id) => {
+                        let guard = self
+                            .codex_oauth_manager
+                            .prepare_live_auth_for_account_switch_away(account_id)
+                            .await
+                            .map_err(|error| error.to_string())?;
+                        if guard.account_missing() {
+                            return Err(
+                                "当前托管账号已删除；请先关闭代理接管，再切换供应商".to_string()
+                            );
+                        }
+                        guard.expected_refresh_token().map(str::to_string)
+                    }
                     None => None,
                 }
             } else {

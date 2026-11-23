@@ -1,0 +1,48 @@
+name: CI exp3 deps-debuginfo A/B
+on:
+  push:
+    branches: [experiment/ci-depsdebug-20261123]
+permissions:
+  contents: read
+jobs:
+  ab:
+    name: ${{ matrix.os }} A,D
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 240
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-22.04, macos-latest, windows-latest]
+    env:
+      ARMS: "A,D"
+      CARGO_INCREMENTAL: "0"   # same as Swatinem/rust-cache in ci.yml
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v6
+      - name: Free disk (Linux)
+        if: runner.os == 'Linux'
+        run: sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache/CodeQL; df -h /
+      - id: tc
+        run: echo "channel=$(sed -nE 's/^channel *= *"([^"]+)".*/\1/p' rust-toolchain.toml)" >> "$GITHUB_OUTPUT"
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: ${{ steps.tc.outputs.channel }}
+      - name: Install Linux system deps
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends build-essential pkg-config libssl-dev libgtk-3-dev librsvg2-dev libayatana-appindicator3-dev libwebkit2gtk-4.1-dev libsoup-3.0-dev
+      - uses: taiki-e/install-action@e407f7bafb71fd004bc5c2da3032e5470cbb6ef0
+        with:
+          tool: cargo-nextest
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.13"
+      - run: mkdir -p dist && python .github/experiments/exp3.py
+      - if: always()
+        uses: actions/upload-artifact@v6
+        with:
+          name: exp3-${{ matrix.os }}
+          path: experiment-results/

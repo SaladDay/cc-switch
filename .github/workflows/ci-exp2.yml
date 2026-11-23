@@ -1,0 +1,52 @@
+name: CI exp2 interleaved A/B
+on:
+  push:
+    branches: [experiment/ci-optdeps-20261123]
+permissions:
+  contents: read
+jobs:
+  ab:
+    name: ${{ matrix.os }} ${{ matrix.arms }}
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 240
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { os: ubuntu-22.04, arms: "A,B" }
+          - { os: macos-latest, arms: "A,B" }
+          - { os: windows-latest, arms: "A,B" }
+          - { os: windows-latest, arms: "A,C" }
+    env:
+      ARMS: ${{ matrix.arms }}
+      CARGO_INCREMENTAL: "0"   # same as Swatinem/rust-cache in ci.yml
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v6
+      - name: Free disk (Linux)
+        if: runner.os == 'Linux'
+        run: sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache/CodeQL; df -h /
+      - id: tc
+        run: echo "channel=$(sed -nE 's/^channel *= *"([^"]+)".*/\1/p' rust-toolchain.toml)" >> "$GITHUB_OUTPUT"
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: ${{ steps.tc.outputs.channel }}
+      - name: Install Linux system deps
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends build-essential pkg-config libssl-dev libgtk-3-dev librsvg2-dev libayatana-appindicator3-dev libwebkit2gtk-4.1-dev libsoup-3.0-dev
+      - uses: taiki-e/install-action@e407f7bafb71fd004bc5c2da3032e5470cbb6ef0
+        with:
+          tool: cargo-nextest
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.13"
+      - run: mkdir -p dist && python .github/experiments/exp2.py
+      - if: always()
+        uses: actions/upload-artifact@v6
+        with:
+          name: exp2-${{ matrix.os }}-${{ matrix.arms == 'A,B' && 'AB' || 'AC' }}
+          path: experiment-results/

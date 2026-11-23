@@ -1,5 +1,5 @@
 """Disposable interleaved A/B benchmark for fork CI only. Arms:
-A = unchanged; B = [profile.dev.package] opt-level=2 for privacy_filter deps (#9872 list);
+A = unchanged; B = main WITHOUT the [profile.dev.package] opt-level=2 block that #9872 merged (reverse A/B);
 C = A + rust-lld linker (Windows only). Each arm has its own target dir; order X Y Y X."""
 import json, os, pathlib, re, shutil, subprocess, sys, time
 
@@ -7,8 +7,9 @@ ARMS = os.environ["ARMS"].split(",")           # e.g. "A,B"
 ORDER = [ARMS[0], ARMS[1], ARMS[1], ARMS[0]]
 ROOT = pathlib.Path.cwd(); OUT = ROOT / "experiment-results"; OUT.mkdir(exist_ok=True)
 MANIFEST = ROOT / "src-tauri/Cargo.toml"; ORIGINAL = MANIFEST.read_text()
-OPT = "\n[profile.dev.package]\n" + "".join(f'{p} = {{ opt-level = 2 }}\n' for p in
-      ["regex", "regex-automata", "regex-syntax", "aho-corasick", "memchr", "toml", "toml_edit", "toml_parser", "winnow"])
+START = ORIGINAL.index("[profile.dev.package]"); END = ORIGINAL.index("[profile.release]")
+NO_OPT = ORIGINAL[:START] + ORIGINAL[END:]
+assert "opt-level = 2" not in NO_OPT
 CARGO = shutil.which("cargo"); BASE = ["--manifest-path", "src-tauri/Cargo.toml", "--locked"]
 R = {"arms": ARMS, "order": ORDER, "cpu_count": os.cpu_count(), "platform": sys.platform, "steps": []}
 ANSI = re.compile(r"\x1b\[[0-9;]*[a-zA-Z]")
@@ -22,7 +23,7 @@ def env_for(arm):
     return e
 
 def use_manifest(arm):
-    MANIFEST.write_text(ORIGINAL + OPT if arm == "B" else ORIGINAL)
+    MANIFEST.write_text(NO_OPT if arm == "B" else ORIGINAL)
 
 def run(name, arm, cmd):
     use_manifest(arm)
@@ -72,6 +73,6 @@ try:
         for arm in ARMS:
             lib = max((x for x in (ROOT / f"target-{arm}/debug/deps").glob("cc_switch_lib-*") if x.suffix == "" and os.access(x, os.X_OK)), key=lambda x: x.stat().st_mtime)
             for k in range(2):
-                run(f"init-{arm}-{k}", arm, [str(lib), "--exact", "proxy::privacy_filter::tests::gitleaks_rules_loaded"])
+                run(f"init-{arm}-{k}", arm, [str(lib), "--exact", "proxy::privacy_filter::tests::pii_and_secrets_detection_rules"])
 finally:
     MANIFEST.write_text(ORIGINAL); save()
